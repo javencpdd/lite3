@@ -1,0 +1,148 @@
+# `/home/ysc` 脚本与模块总体分析
+
+> 范围：通过 `mcp-ssh-apply-patch` 对 `user-f20` 的 `/home/ysc` 执行只读盘点。记录时间：2026-09-06。
+>
+> 跳过规则：不递归展开第三方库、SDK、`lib`、`build`、`third-party`、`third_libs` 目录；仅记录其名称及用途推断。未修改远端文件、服务、网络或机器人控制状态。
+
+## 1. 总体结论
+
+`/home/ysc` 是这台 Lite3 运动主机的主要部署根目录。当前实际运行的主链路是：
+
+```text
+systemd
+ ├─ jy_exe.service (enabled, active)
+ │    └─ /home/ysc/jy_exe/run.sh
+ │         └─ bin/jy_exe -> backup/deeprcs
+ ├─ rtsp_stream.service (enabled, active)
+ │    └─ /home/ysc/rtsp_stream/start_stream.sh
+ │         ├─ mediamtx v1.4.2
+ │         └─ GStreamer: /dev/video0 -> RTSP /test
+ └─ track.service (enabled, active)
+      └─ /home/ysc/track/start_track.sh -> ./track
+           └─ 消费本机 RTSP，并向本机运动端口发送私有控制数据
+```
+
+`jy_exe` 是核心运动控制部署；`rtsp_stream` 提供相机视频；`track` 是闭源视觉跟随程序。`host`、`master`、`module` 和 `slave` 是热点/网络角色与安装维护工具，当前均不是上述主链路的活动进程。
+
+## 2. 顶层目录职责
+
+| 目录/文件 | 职责判断 | 是否展开 |
+| --- | --- | --- |
+| `jy_exe/` | 厂商运动控制部署：二进制、策略、配置、服务和维护脚本 | 深度分析，见 `YSC_JY_EXE_ANALYSIS.md` |
+| `rtsp_stream/` | 当前活动的视频发布部署；MediaMTX + GStreamer 脚本 | 深度分析，见 `YSC_RTSP_STREAM_ANALYSIS.md` |
+| `track/` | 闭源目标检测/跟随程序，使用 RKNN/RTSP/私有 UDP | 仅总体登记；当前 active |
+| `host/` | 单机热点、DHCP/hostapd 与 NAT 的启动方案 | 总体分析 |
+| `master/` | 多机群控热点模式的启动方案 | 总体分析 |
+| `module/` | Wi-Fi 内核模块、启动分区设备树及部署脚本 | 深度分析，见 `YSC_MODULE_ANALYSIS.md` |
+| `slave/` | 从机侧保存 Wi-Fi 清理与连接脚本 | 深度分析，见 `YSC_SLAVE_ANALYSIS.md` |
+| `qirui/` | 库集合压缩包及解压目录，无独立脚本/入口 | 深度分析，见 `YSC_QIRUI_ANALYSIS.md` |
+| `Lite3_MotionSDK/` | Lite3 Motion SDK 源码/示例 | SDK，按规则不递归；已有单独 SDK 分析报告 |
+| `sdk_lib/` | Lite3 SDK 传输库源码/构建制品 | SDK，按规则不递归 |
+| `rl_deploy/` | RL 推理二进制与 ONNX/PT 策略资产 | 仅登记；独立部署脚本存在，当前主服务未使用 |
+| `lite3_voice/` | 中英文语音 WAV 素材 | 资产目录，无脚本 |
+| `.zetton/` | 第三方视频分析/RTSP 部署及其启动包装 | 不递归；替代 `streaming.service` 当前未启用 |
+| `.cache`、`.config`、`.copilot`、`.vscode-*`、`.ssh` 等 | 账户工具/缓存/私有配置 | 不展开 |
+| `.deb`、`.tar.gz`、`.zip`、`deeprcs` | 安装包、归档或独立二进制制品 | 仅登记 |
+
+### 跳过的库/SDK及用途推断
+
+| 位置 | 不展开原因 | 用途推断 |
+| --- | --- | --- |
+| `Lite3_MotionSDK/` | Lite3 SDK | 上位机关节控制与 UDP 状态/命令示例 |
+| `sdk_lib/` | SDK/传输库 | Lite3 UDP 协议、socket、数据结构实现 |
+| `qirui/lib/`、`qirui/lib.zip` | 第三方库包 | Eigen、EtherCAT/KPA、RKNN、Torch、日志、YAML 等依赖集合 |
+| 各模块 `lib/`、`build/` | 第三方/构建产物 | 运行时动态库、模型推理库或编译产物 |
+| `rtsp_stream/ZLMediaKit/` | 第三方媒体服务器发行物 | 备用 ZLMediaKit 媒体服务；当前非活动主服务 |
+
+### 逐目录保留的未展开项
+
+下表列出本次保留在结构输出、但不进入单文件/单库递归说明的目录。它们不是“遗漏”，而是按范围规则主动跳过。
+
+| 目录 | 整体用途 | 跳过原因 | 定位 |
+| --- | --- | --- | --- |
+| `/home/ysc/.cache` | 用户/工具缓存 | 自动生成缓存，且部分私有子目录不可读 | 非业务运行逻辑 |
+| `/home/ysc/.ccache` | C/C++ 编译缓存 | 工具自动生成 | 构建加速缓存 |
+| `/home/ysc/.config`、`.copilot`、`.local`、`.npm`（如存在） | 用户应用配置和数据 | 与机器人业务无直接入口；避免扩展至个人配置 | 用户环境 |
+| `/home/ysc/.ssh` | SSH 身份与主机配置 | 安全敏感目录，不读取凭据 | 管理账户配置 |
+| `/home/ysc/.vscode-server`、`.vscode-remote-containers`、`.dotnet`、`.vim`、`.nx` | 编辑器、运行时或开发工具数据 | 第三方/自动生成内容 | 开发环境支持 |
+| `/home/ysc/Lite3_MotionSDK` | Lite3 Motion SDK | SDK，已有独立分析；本任务不重复递归 | 官方/厂商控制 SDK |
+| `/home/ysc/sdk_lib` | Lite3 SDK 库 | SDK/构建库 | UDP 控制传输依赖 |
+| `/home/ysc/qirui/lib` | 依赖库合集 | 第三方库 | 见 `YSC_QIRUI_ANALYSIS.md` |
+| `/home/ysc/jy_exe/lib`、`robot_common`、`policy`、`data`、`log` | 厂商库、公共组件、模型、运行数据、日志 | 二进制/模型/自动生成内容 | 核心控制运行时支撑 |
+| `/home/ysc/track/lib`、`model` | RKNN/OpenCV 等运行库和视觉模型 | 第三方库/模型资产 | 闭源视觉跟随依赖 |
+| `/home/ysc/rl_deploy/data`、`policy` | RL 数据和 ONNX/PT 模型 | 模型/数据资产 | 可选 RL 部署材料 |
+| `/home/ysc/rtsp_stream/ZLMediaKit`、`log` | 备用媒体服务器发行物及日志 | 第三方二进制/自动生成日志 | 非当前活动主媒体链路 |
+| `/home/ysc/.zetton/install`、`.zetton/rtsp_server`、`.zetton/third_libs` | 视频分析安装树、备用 RTSP 与第三方库 | 第三方部署与依赖 | `streaming.service` 的备用方案 |
+
+## 3. 运行入口与服务状态
+
+| 服务 | enabled | 当前状态 | 入口/现状 |
+| --- | --- | --- | --- |
+| `jy_exe.service` | 是 | active | `/home/ysc/jy_exe/run.sh`，核心运动服务 |
+| `rtsp_stream.service` | 是 | active | `/home/ysc/rtsp_stream/start_stream.sh`，当前媒体链路 |
+| `track.service` | 是 | active | `bash /home/ysc/track/start_track.sh`，视觉跟随 |
+| `host.service` | 是 | inactive | 入口是 `host/host_start.sh`；该路径当前指向 `host_start2.sh` |
+| `wifi.service` | 否 | inactive | `jy_exe/scripts/ap_start.sh start 5G`，未作为当前热点入口 |
+| `multi_master.service` | 否 | inactive | `master/master_start.sh`，备用群控模式 |
+| `streaming.service` | 否 | inactive | `.zetton/streaming.sh`，备用视频分析/流媒体方案 |
+| `jy_rl.service` | 是 | failed | 指向缺失的 `/home/ysc/rl/bin/run_rl.sh` |
+| `lora.service` | 是 | failed | 指向缺失的 `/home/ysc/lora/start_lora.sh` |
+| `push.service` | 未见已安装活动单元 | inactive | 目录内模板仍引用旧的 `/home/firefly/...` 路径 |
+
+未在这些 service unit 中设置 `User=` 或 `Group=`，因此 systemd 默认以 root 执行；这解释了启动脚本可改 CPU governor、IRQ、网络、CAN 和热点配置。
+
+## 4. 模块间依赖与调用关系
+
+```text
+Motion / navigation side
+  jy_exe.service
+    -> jy_exe/run.sh
+       -> clean_expired_log.sh
+       -> catchsegv bin/jy_exe (闭源 deeprcs)
+       -> conf/{network,Algorithm,motor,name,...}
+       -> policy/*.pt, *.onnx
+
+Video / visual following side
+  rtsp_stream.service
+    -> mediamtx (:8554)
+    -> GStreamer /dev/video0 -> H.264 -> rtsp://127.0.0.1:8554/test
+  track.service
+    -> ./track
+       -> 读取上述 RTSP /test
+       -> 本机 UDP 运动接口（配置在 track/config.json）
+
+Network role tooling
+  module/deploy.sh
+    -> 安装 8822ce.ko、写 boot 分区、复制 host_start2.sh
+  host.service -> host/host_start.sh (符号链接)
+    -> host_start2.sh: NAT + host/ap_start.sh
+    -> 或由 MasterControl.sh 切换至 host_start3.sh
+  multi_master.service -> master/master_start.sh
+  slave/*.sh -> NetworkManager 管理 p2p0 的从机联网
+```
+
+## 5. 非重点脚本的职责
+
+| 路径 | 参数/调用场景 | 作用与风险 |
+| --- | --- | --- |
+| `host/MasterControl.sh` | `enable` / `disable` | 切换 `host_start.sh` 和 `/etc/dhcp/dhcpd.conf` 的符号链接，选择群控或普通主机方案；直接改系统 DHCP 配置 |
+| `host/host_start2.sh` | `host.service` 当前目标 | 等待 `p2p0`，追加 NAT 规则，调用 `host/ap_start.sh start 5G` |
+| `host/host_start3.sh` | 群控模式 | 配置 `wlan0` 为 `192.168.3.1/24`，重启 ISC DHCP，并启动 hostapd |
+| `master/enable_master.sh`、`disable_master.sh` | 手工运行 | enable/disable `multi_master.service` |
+| `master/master_start.sh` | `multi_master.service` | 使用 `p2p0`、ISC DHCP、hostapd 的群控热点方案 |
+| `Wifi.sh` | 手工运行；可用环境变量覆盖目标 | 交互式连接外部 Wi-Fi，必要时备份/改写 NetworkManager 配置、删改默认路由和 DNS；高影响网络修复工具 |
+| 根目录 `ap_start.sh` | `start 5G` / `start 24G` / `stop` | 旧版 NetworkManager 热点创建脚本；与 `host/ap_start.sh`、`jy_exe/scripts/ap_start.sh` 的热点配置可能冲突 |
+| `set_home.sh` | 手工运行 | 直接向 CAN0–CAN3 发送帧；会影响执行器状态 |
+| `set_up_lora.sh` | 交互式 root 工具 | 生成并安装 lora systemd 服务；当前对应目录缺失，运行会产生失效服务 |
+| `stop_lora.sh`、`show_log.sh` | 手工运行 | 停止/跟随 lora 服务 |
+| `.zetton/streaming.sh` | `streaming.service` | 启动备用 MediaMTX 和视频分析程序；该服务当前 disabled/inactive |
+| `rl_deploy/bin/run_rl_deploy.sh` | 手工/独立 service 模板 | 延迟后固定 CPU 核运行 RL 推理二进制；不是当前 `jy_rl.service` 使用路径 |
+| `track/start_track.sh` | `track.service` | 延迟后以 root 启动闭源视觉跟随二进制 |
+
+## 6. 全局风险与维护边界
+
+1. **运行目录优先级明确。**应以 `/home/ysc/jy_exe`、`rtsp_stream`、`track` 为当前活动部署；不要把同名旧目录或归档包当作运行入口。
+2. **热点脚本存在三套实现。**它们共用 NetworkManager profile 名称、但子网掩码、SSID 生成方式和启动接口不同；不要并行启用。
+3. **网络启动脚本会直接改 NAT、DHCP、hostapd 或默认路由。**恢复/切换前必须备份并记录当前 NetworkManager profile、iptables/nftables、路由和服务状态。
+4. **多个维护脚本假设 root。**systemd 默认 root 运行，CAN、CPU governor、IRQ、boot 分区和网络操作均有设备级影响。
+5. **失效服务应单独整治。**`jy_rl.service`、`lora.service` 已启用但失败，根因是目标路径缺失；在明确用途前不应盲目重启或删除。
