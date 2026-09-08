@@ -17,7 +17,7 @@
 │   ├── hosts/                  # 按主机归档的审计报告
 │   │   ├── host-103/           # 感知、定位、导航与 ROS 双栈分析
 │   │   └── host-120/           # Lite3 运动控制、视频与网络分析
-│   └── operations/             # 跨主机维护说明
+│   └── operations/             # 跨主机维护说明与跨主机方案
 ├── .gitignore                  # 本地编辑器与临时文件忽略规则
 ├── LICENSE                     # MIT 许可证
 └── README.md                   # 仓库入口
@@ -38,7 +38,8 @@ cd lite3
 
 1. [跨主机维护说明](docs/operations/host-maintenance.md)了解当前角色、实测配置和风险；
 2. [103 主机文档](docs/hosts/host-103/README.md)了解 ROS、传感器、地图和导航链；
-3. [120 主机文档](docs/hosts/host-120/README.md)了解运动控制、RTSP、热点和 SDK 边界。
+3. [120 主机文档](docs/hosts/host-120/README.md)了解运动控制、RTSP、热点和 SDK 边界；
+4. [应急蜡烛/火焰检测方案](docs/operations/fire-candle-detection.md)在双主机上落地火焰检测时阅读。
 
 ## 使用示例
 
