@@ -15,8 +15,8 @@
 .
 ├── docs/                       # 全部项目文档
 │   ├── hosts/                  # 按主机归档的审计报告
-│   │   ├── host-103/           # 感知、定位、导航与 ROS 双栈分析
-│   │   └── host-120/           # Lite3 运动控制、视频与网络分析
+│   │   ├── 103-感知导航主机/    # 感知、定位、导航与 ROS 双栈分析
+│   │   └── 120-运动控制主机/    # Lite3 运动控制、视频与网络分析
 │   └── operations/             # 跨主机维护说明与跨主机方案
 ├── .gitignore                  # 本地编辑器与临时文件忽略规则
 ├── LICENSE                     # MIT 许可证
@@ -37,8 +37,8 @@ cd lite3
 建议按以下顺序阅读：
 
 1. [跨主机维护说明](docs/operations/host-maintenance.md)了解当前角色、实测配置和风险；
-2. [103 主机文档](docs/hosts/host-103/README.md)了解 ROS、传感器、地图和导航链；
-3. [120 主机文档](docs/hosts/host-120/README.md)了解运动控制、RTSP、热点和 SDK 边界；
+2. [103 感知导航主机文档](docs/hosts/103-感知导航主机/README.md)了解 ROS、传感器、地图和导航链；
+3. [120 运动控制主机文档](docs/hosts/120-运动控制主机/README.md)了解运动控制、RTSP、热点和 SDK 边界；
 4. [应急蜡烛/火焰检测方案](docs/operations/fire-candle-detection.md)在双主机上落地火焰检测时阅读。
 
 ## 使用示例
@@ -46,22 +46,22 @@ cd lite3
 查看 103 的 ROS 2 传输、导航和地图关系：
 
 ```bash
-sed -n '1,220p' docs/hosts/host-103/00-总体分析.md
-sed -n '1,220p' docs/hosts/host-103/08-ROS2-传输避障与跟踪.md
+sed -n '1,220p' 'docs/hosts/103-感知导航主机/概览与环境/总体分析.md'
+sed -n '1,220p' 'docs/hosts/103-感知导航主机/ROS2软件栈/传输避障与跟踪.md'
 ```
 
 查看 120 的运动、视频和热点维护边界：
 
 ```bash
-sed -n '1,220p' docs/hosts/host-120/YSC_JY_EXE_ANALYSIS.md
-sed -n '1,220p' docs/hosts/host-120/USER_F20_NETWORK_HOTSPOT_ANALYSIS.md
+sed -n '1,220p' 'docs/hosts/120-运动控制主机/运动控制与导航/运动控制部署分析.md'
+sed -n '1,220p' 'docs/hosts/120-运动控制主机/网络与连接/网络与无线热点分析.md'
 ```
 
 这些命令只读取仓库文档；它们不会连接或操作远端主机。
 
 ## 贡献指南
 
-1. 新报告按对象归入 `docs/hosts/host-<id>/` 或 `docs/operations/`，不要在根目录新增业务文档。
+1. 新报告按对象归入 `docs/hosts/<IP后缀-中文角色>/` 的对应专题，或 `docs/operations/`；不要在根目录新增业务文档。
 2. 每项“当前状态”注明采集时间、采集方式和主机标识；历史笔记需与新实测明确区分。
 3. 不提交密码、令牌、私钥、Wi-Fi 密钥、客户数据、完整日志或可直接触发机器人运动的未审计脚本。
 4. 新增或移动文件后同步更新所属目录的 `README.md` 和本文件的目录说明。

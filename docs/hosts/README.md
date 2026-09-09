@@ -1,18 +1,18 @@
 # 主机审计文档
 
-本目录按受审计主机分组保存只读分析报告。目录名使用稳定的 `host-<IP 后缀>` 形式；文档内会同时记录实际 hostname 和 MCP 连接别名，避免把逻辑名称与机器名称混淆。
+本目录按主机角色和专题保存只读审计报告。目录名以 IP 后缀开头，后接中文角色说明；每个专题目录均有 `README.md` 作为文件索引和阅读入口。
 
-## 文件与子目录
+## 主机分组
 
-| 路径 | 主机定位 | 使用方式 |
+| 目录 | 主机角色 | 使用方式 |
 | --- | --- | --- |
-| [`host-103/`](host-103/README.md) | 实际 hostname 为 `lite` 的 NVIDIA/ROS 感知、定位与导航侧 | 查询 ROS 1/ROS 2、传感器、地图、Transfer 或导航脚本。 |
-| [`host-120/`](host-120/README.md) | 实际 hostname 为 `ysc` 的 Rockchip/Lite3 运动、视频与网络侧 | 查询 `jy_exe`、RTSP、视觉跟随、热点及底层部署资料。 |
+| [`103-感知导航主机/`](103-感知导航主机/README.md) | 实际 hostname 为 `lite` 的 NVIDIA/ROS 感知、定位、建图与导航侧 | 查询 ROS 1/ROS 2、传感器、地图、Transfer 与导航集成。 |
+| [`120-运动控制主机/`](120-运动控制主机/README.md) | 实际 hostname 为 `ysc` 的 Rockchip/Lite3 运动控制、视频与网络侧 | 查询 `jy_exe`、RTSP/RTMP、视觉跟随、热点及底层部署资料。 |
 
-## 使用方式
+## 使用约定
 
-1. 先从目标主机的 `README.md` 选择专题报告；
-2. 将报告中的采集时间与当前实测结果对照；
-3. 涉及两机端口、地址或控制链时，再阅读 [`../operations/host-maintenance.md`](../operations/host-maintenance.md)。
+1. 先进入目标主机的 `README.md`，再按专题进入下级目录；
+2. 服务状态、地址、端口和资源数据均会随时间变化，变更前必须重新实测；
+3. 涉及两机控制链、端口或运行基线时，阅读 [`../operations/host-maintenance.md`](../operations/host-maintenance.md)。
 
-不要把文档中的历史 service 状态、网络路由或硬编码值直接当作执行命令的依据。
+不要将历史报告中的命令、地址或状态直接当作生产变更依据。
