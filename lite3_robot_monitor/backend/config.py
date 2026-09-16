@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Tuple
+from typing import List, Optional, Tuple
 
 
 def _get_str(name: str, default: str) -> str:
@@ -58,6 +58,14 @@ class UDPConfig:
     timeout: float = _get_float("LITE3_UDP_TIMEOUT", 0.1)
     # 接收队列最大长度，超限时丢弃最旧的数据包，防止长时间断网后堆积
     max_queue_size: int = _get_int("LITE3_UDP_QUEUE", 1024)
+    # 接收模式：
+    #   auto  —— Linux 上优先用旁路抓包（不占用端口），失败则退回 bind（默认）
+    #   sniff —— 强制旁路抓包；103 部署推荐，避免与 transfer_ros2 抢 43897
+    #   bind  —— 强制绑定端口；Windows 开发机或没有 root 权限时使用
+    mode: str = _get_str("LITE3_UDP_MODE", "auto").lower()
+    # 旁路抓包监听的网卡名；为空表示所有网卡。
+    # 指定网卡可显著减少无关流量（例如 103 上拉取的 RTSP 视频流）。
+    interface: Optional[str] = _get_str("LITE3_UDP_IFACE", "") or None
 
 
 @dataclass(frozen=True)
@@ -97,9 +105,9 @@ service_config = ServiceConfig()
 display_config = DisplayConfig()
 
 
-def get_joint_names() -> list[str]:
+def get_joint_names() -> List[str]:
     """生成 12 个关节的显示名称，例如 FR_hip、FR_thigh ...。"""
-    names: list[str] = []
+    names: List[str] = []
     for leg in display_config.joint_legs:
         for part in display_config.joint_parts:
             names.append(f"{leg}_{part}")

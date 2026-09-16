@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import struct
 import time
-from typing import Any, Dict, Final, Optional, Tuple
+from typing import Any, Dict, Final, List, Optional, Tuple
 
 from config import get_joint_names
 
@@ -131,9 +131,9 @@ def to_hex_preview(data: bytes, limit: int = 64) -> str:
     return preview
 
 
-def to_hex_dump(data: bytes, max_bytes: int = 256) -> list[str]:
+def to_hex_dump(data: bytes, max_bytes: int = 256) -> List[str]:
     """生成完整的十六进制转储行（偏移 + hex + ascii），供调试面板使用。"""
-    lines: list[str] = []
+    lines: List[str] = []
     limit = min(len(data), max_bytes)
     for offset in range(0, limit, 16):
         chunk = data[offset:offset + 16]
@@ -260,7 +260,7 @@ def parse_robot_state(data: bytes, addr: Optional[Tuple[str, int]] = None) -> Di
 # ----------------------------------------------------------------------
 # 0x0902 / 0x0903 关节数据
 # ----------------------------------------------------------------------
-def _parse_joint_values(data: bytes) -> Optional[list[float]]:
+def _parse_joint_values(data: bytes) -> Optional[List[float]]:
     """解析 12 个 double 类型的关节数据；长度不足时返回 None。"""
     if len(data) < HEADER_SIZE + JOINT_PAYLOAD_SIZE:
         return None

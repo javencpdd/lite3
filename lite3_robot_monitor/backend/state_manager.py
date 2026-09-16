@@ -187,6 +187,7 @@ class StateManager:
             last_update=last_update,
             since_last_update=since,
             udp_running=bool(stats.get("running", False)),
+            udp_mode=str(stats.get("mode", "bind")),
             udp_host=str(stats.get("host", "")),
             udp_port=int(stats.get("port", 0) or 0),
             packets_received=int(stats.get("received_packets", 0)),

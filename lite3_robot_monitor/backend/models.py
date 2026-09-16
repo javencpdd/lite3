@@ -147,6 +147,7 @@ class ServiceStatus(BaseModel):
     last_update: Optional[float] = Field(None, description="最后一次收到 UDP 数据的时间戳（秒）")
     since_last_update: Optional[float] = Field(None, description="距最后一次收到数据的间隔（秒）")
     udp_running: bool = False
+    udp_mode: str = Field("bind", description="接收模式：sniff（旁路抓包）或 bind（绑定端口）")
     udp_host: str = ""
     udp_port: int = 0
     packets_received: int = 0

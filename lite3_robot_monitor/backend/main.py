@@ -22,7 +22,7 @@ import logging
 import os
 import sys
 import time
-from typing import Any, Dict, Set
+from typing import Any, Dict, List, Optional, Set
 
 # 保证既支持 `uvicorn main:app`，也支持从其他工作目录脚本方式启动
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +39,7 @@ from models import MonitorState, RawPacketResponse, ServiceStatus  # noqa: E402
 from parser import parse_packet  # noqa: E402
 from state_manager import StateManager  # noqa: E402
 from udp_receiver import UDPReceiver  # noqa: E402
+from udp_sniffer import UDPSniffer  # noqa: E402
 
 # ----------------------------------------------------------------------
 # 日志
@@ -75,7 +76,7 @@ class WebSocketManager:
 
     async def broadcast(self, message: str) -> None:
         """向所有在线客户端广播文本消息，异常连接自动清理。"""
-        dead: list[WebSocket] = []
+        dead: List[WebSocket] = []
         for client in list(self._clients):
             try:
                 await client.send_text(message)
@@ -90,23 +91,72 @@ class MonitorService:
     """组合 UDP 接收器、状态管理器与 WebSocket 广播的核心服务。"""
 
     def __init__(self) -> None:
-        # UDP 接收器（后台线程）
-        self.receiver = UDPReceiver()
+        # UDP 接收器：由 _build_receiver() 按配置创建（sniff 或 bind）
+        self.receiver: Any = None
+        # 当前实际生效的接收模式：sniff / bind
+        self.udp_mode: str = "bind"
         # 状态仓库（线程安全）
         self.state = StateManager()
         # WebSocket 连接池
         self.ws = WebSocketManager()
-        # 消费任务与广播任务句柄
-        self._consumer_task: asyncio.Task | None = None
-        self._broadcast_task: asyncio.Task | None = None
-        # UDP 是否已成功绑定
+        # 消费任务与广播任务句柄（Optional 写法以兼容 Python 3.8）
+        self._consumer_task: Optional[asyncio.Task] = None
+        self._broadcast_task: Optional[asyncio.Task] = None
+        # UDP 是否已就绪
         self.udp_ready: bool = False
 
     # ------------------------------------------------------------------
+    def _build_receiver(self) -> Any:
+        """按配置创建接收器。
+
+        103 部署要点：UDP 43897 已被 `transfer_ros2` 独占，
+        因此 Linux 上默认走 **sniff 旁路抓包**，不占用端口、不影响现有服务；
+        抓包不可用时自动退回 bind 模式。
+
+        Returns:
+            UDPSniffer 或 UDPReceiver 实例（两者接口一致）
+        """
+        mode = udp_config.mode
+        want_sniff = mode in ("auto", "sniff")
+
+        if want_sniff:
+            if not UDPSniffer.is_supported():
+                if mode == "sniff":
+                    logger.warning("当前平台不支持 AF_PACKET，强制退回 bind 模式")
+                else:
+                    logger.info("非 Linux 平台，使用 bind 模式")
+            else:
+                sniffer = UDPSniffer(
+                    port=udp_config.port,
+                    interface=udp_config.interface,
+                    max_queue_size=udp_config.max_queue_size,
+                )
+                try:
+                    sniffer.start()
+                    self.udp_mode = "sniff"
+                    logger.info(
+                        "已启用旁路抓包模式（不占用 UDP 端口，不影响 transfer_ros2）"
+                    )
+                    return sniffer
+                except PermissionError:
+                    logger.error(
+                        "旁路抓包需要 root 或 CAP_NET_RAW 权限；"
+                        "若以 systemd 运行请确认 AmbientCapabilities=CAP_NET_RAW，现退回 bind 模式"
+                    )
+                except OSError as exc:
+                    logger.error("旁路抓包启动失败(%s)，退回 bind 模式", exc)
+
+        # bind 模式：直接绑定端口（Windows 开发机 / 无权限时的兜底）
+        self.udp_mode = "bind"
+        return UDPReceiver()
+
     async def start(self) -> None:
         """启动 UDP 接收、消费任务与广播任务。"""
         try:
-            self.receiver.start()
+            self.receiver = self._build_receiver()
+            if self.udp_mode == "bind":
+                # sniff 模式在 _build_receiver 内已 start
+                self.receiver.start()
             self.udp_ready = True
         except OSError:
             logger.error(
@@ -127,7 +177,8 @@ class MonitorService:
                     await task
         self._consumer_task = None
         self._broadcast_task = None
-        self.receiver.stop()
+        if self.receiver is not None:
+            self.receiver.stop()
 
     # ------------------------------------------------------------------
     async def _consume_loop(self) -> None:
@@ -139,6 +190,10 @@ class MonitorService:
         get_packet = functools.partial(self.receiver.get_packet, 0.1)
 
         while True:
+            if self.receiver is None:
+                # 接收器未就绪（如端口绑定失败），退避等待，避免空转
+                await asyncio.sleep(1.0)
+                continue
             try:
                 frame = await loop.run_in_executor(None, get_packet)
             except asyncio.CancelledError:
@@ -181,7 +236,10 @@ class MonitorService:
     # ------------------------------------------------------------------
     def status(self) -> ServiceStatus:
         """返回服务运行状态。"""
-        return self.state.get_status(self.receiver.stats(), service_config.push_hz)
+        stats = self.receiver.stats() if self.receiver is not None else {}
+        # 以实际生效的接收模式为准（sniff / bind）
+        stats["mode"] = self.udp_mode
+        return self.state.get_status(stats, service_config.push_hz)
 
 
 service = MonitorService()
@@ -198,6 +256,7 @@ async def lifespan(app: FastAPI):  # noqa: ANN201 - FastAPI 生命周期钩子
         udp_config.host, udp_config.port, service_config.host, service_config.port,
     )
     await service.start()
+    logger.info("UDP 接收模式: %s（sniff=旁路抓包不占端口，bind=绑定端口）", service.udp_mode)
     try:
         yield
     finally:
