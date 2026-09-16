@@ -1,0 +1,71 @@
+/* 全局样式：浅色工程仪表盘风格 */
+
+:root {
+  --bg: #f5f7fa;
+  --panel: #ffffff;
+  --panel-border: #e3e8ef;
+  --text: #1f2937;
+  --text-sub: #6b7280;
+  --accent: #2563eb;
+  --accent-soft: #eff4ff;
+  --ok: #16a34a;
+  --warn: #f59e0b;
+  --danger: #dc2626;
+  --chip-bg: #f1f5f9;
+  --radius: 12px;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 12px rgba(16, 24, 40, 0.06);
+  font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* 卡片通用样式 */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 18px;
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-sub);
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+.card-title .sub {
+  font-size: 12px;
+  font-weight: 400;
+  color: #94a3b8;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', 'Consolas', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}

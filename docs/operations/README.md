@@ -8,9 +8,15 @@
 | --- | --- | --- |
 | [`host-maintenance.md`](host-maintenance.md) | 103 与 120 的实测硬件、系统、磁盘、网络、服务、组件、角色差异和常见风险 | 远程连接、排障、变更评审或交接前优先阅读。 |
 | [`fire-candle-detection.md`](fire-candle-detection.md) | 基于现有主机算力与视频链路的"应急蜡烛 / 火焰"检测方案，覆盖数据接入、双路检测、误报抑制、ROS 联动与实机验证 | 在 Jetson 103 或 RK3588 120 上落地火焰检测时阅读，对照其中的实机验证表做验收。 |
+| [`indoor-patrol-fire-detection.md`](indoor-patrol-fire-detection.md) | 在检测方案之上的"室内多房间巡检"执行方案：建图、路点录制、**按路段自定义移动速度**（重点区间慢速）、Nav2+VOA 自主导航、检测触发、事件去重、异常处理，以及 Foxglove 远程可视化 | 要把烛火检测装到移动巡检任务上时阅读；含 CLI 总表、参数总表、降级策略与最小验证步骤。**流程/速度分区/阈值以此为准**；无 GUI 部署细节见 `headless-remote-ops.md`。 |
+| [`hierarchical-avoidance-3d-upgrade.md`](hierarchical-avoidance-3d-upgrade.md) | 参考 SCAN-Planner 的"全局 2D + 局部 3D"分层避障架构、两层数据接口与重规划触发条件，以及 2D→3D 升级的算力/内存/实时性评估与硬件结论 | 规划模块升级或评估是否需要外接 Jetson 算力模块时阅读。 |
+| [`headless-remote-ops.md`](headless-remote-ops.md) | 把巡检方案改造成"被控端无图形界面、控制端 Foxglove 远程可视化"的落地方案：目录重构、改动清单、被控端完整终端命令流程、控制端接入与 Foxglove 面板配置 | 要在无桌面/纯 SSH 环境下操作机器人、或需要远程看建图与检测结果时阅读；配套资产在仓库 `ops/`。 |
 
 ## 使用方式
 
 - 先核对文档中的采集时间与真实主机、MCP 别名和 IP；再参考服务、端口和职责说明。
 - 本目录的文档是维护基线，不代替上线前的健康检查、现场安全流程或厂商操作手册。
 - 新增跨主机专题时将其置于此目录，并同步更新本文件的清单。
+
+
+

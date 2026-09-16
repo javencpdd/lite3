@@ -18,3 +18,4 @@ site/
 # Local agent/session metadata
 .agents/
 .codex/
+.workbuddy/
