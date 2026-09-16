@@ -20,3 +20,4 @@ site/
 .codex/
 .workbuddy/
 lite3_robot_monitor/
+.codex-remote-bootstrap/
