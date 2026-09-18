@@ -106,8 +106,20 @@ def get_packet_code(data: bytes) -> Optional[int]:
 
 
 def _header_info(data: bytes) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """解析 12 字节通用消息头，返回 (头部摘要, 头部原始字段)。"""
-    code, length, sequence = struct.unpack('<3I', data[:HEADER_SIZE])
+    """解析 12 字节通用消息头，返回 (头部摘要, 头部原始字段)。
+
+    依据厂商文档 1.1 节，头部结构为::
+
+        struct CommandHead {
+            uint32_t code;            // 指令码
+            uint32_t paramters_size;  // 数据内容长度
+            uint32_t type;            // 0=简单指令，1=复杂指令
+        };
+
+    文档附录实例 `0209 0000 | 6000 0000 | 0100 0000` 即
+    code=0x0902、paramters_size=0x60(96)、type=1（复杂指令）。
+    """
+    code, paramters_size, cmd_type = struct.unpack('<3I', data[:HEADER_SIZE])
     summary = {
         "type": "",                       # 由各 parse 函数填充
         "code": f"0x{int(code):04X}",
@@ -115,9 +127,9 @@ def _header_info(data: bytes) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "length": len(data),
     }
     header_fields = {
-        # 头部后两个字段的语义以 Lite3 SDK 为准，此处仅透传用于协议调试
-        "header_length": int(length),
-        "header_sequence": int(sequence),
+        # 头部第 2、3 个字段（此前误命名为 length/sequence，据文档更正）
+        "paramters_size": int(paramters_size),
+        "cmd_type": int(cmd_type),
     }
     return summary, header_fields
 

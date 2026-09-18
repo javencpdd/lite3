@@ -13,13 +13,18 @@ Lite3 机器人本体
       │  UDP 二进制报文 (0x0901 / 0x0902 / 0x0903)
       ▼
 ┌──────────────────────── Backend (FastAPI) ────────────────────────┐
-│  udp_receiver.py   后台线程收发，写入线程安全队列                   │
+│  udp_sniffer.py    103：AF_PACKET 旁路抓包，不占端口、不影响现有服务 │
+│  udp_receiver.py   开发机：bind 端口，后台线程收发写队列             │
 │        ▼                                                           │
 │  parser.py         bytes → 结构化 dict（协议逻辑与原脚本一致）       │
 │        ▼                                                           │
 │  state_manager.py  保存最新状态 + 原始报文环形缓存 + 在线判定        │
 │        ▼                                                           │
 │  main.py           REST (/api/*) + WebSocket (/ws/state, 10Hz)     │
+└────────────────────────────────────────────────────────────────────┘
+        ▲ 控制回程（可选，默认关闭）
+        │  control_service.py → UDP 192.168.1.120:43893
+        │  SimpleCMD(12B) / ComplexCMD(20B) / 手柄帧(42B)
 └────────────────────────────────────────────────────────────────────┘
       │  WebSocket JSON 推送
       ▼
@@ -39,6 +44,8 @@ Lite3 机器人本体
 | 去 GUI | 不再依赖 Tkinter，UDP 线程与 Web 事件循环彻底解耦 |
 | 单一职责 | 接收、解析、状态管理、接口、展示分别独立成模块 |
 | 可扩展 | 预留视频、AI 检测、ROS2 桥接的接入位置 |
+| **零侵入** | 103 上走旁路抓包，与 `transfer_ros2` 共存，不抢 43897（见第五节） |
+| **3.8 兼容** | 面向 103 的 Ubuntu 20.04 / Python 3.8，未使用 3.9+ 语法 |
 
 ---
 
@@ -53,7 +60,17 @@ lite3_robot_monitor/
 │   ├── state_manager.py   # 最新状态仓库 + 原始报文缓存 + 在线判定
 │   ├── models.py          # Pydantic 响应模型
 │   ├── config.py          # 集中配置，支持环境变量覆盖
+│   ├── udp_sniffer.py     # 旁路抓包接收器（Linux AF_PACKET，不占端口，103 专用）
+│   ├── control_protocol.py # 控制报文构造（SimpleCMD / ComplexCMD / 手柄帧）
+│   ├── control_service.py  # 指令发送、心跳保活、急停、限幅与审计
 │   └── requirements.txt
+├── docs/protocol/
+│   └── lite3-udp-protocol.md  # 厂商《运动主机 UDP 通讯接口》摘录存档
+├── deploy/
+│   ├── install.sh             # 103 一键部署（venv + 依赖 + systemd）
+│   ├── lite3-monitor.service  # systemd 单元，含 CAP_NET_RAW 能力配置
+│   ├── pack.sh                # 笔记本侧打包（自动剔除 node_modules）
+│   └── README.md              # 部署、验证、排错与回滚
 ├── frontend/
 │   ├── package.json
 │   ├── vite.config.js     # 内置 /api、/ws 代理
@@ -67,7 +84,8 @@ lite3_robot_monitor/
 │       │   ├── RobotStatus.vue
 │       │   ├── IMUChart.vue
 │       │   ├── JointPanel.vue
-│       │   └── RawPacket.vue
+│       │   ├── ControlPanel.vue
+└── RawPacket.vue
 │       └── style.css
 ├── tools/
 │   ├── mock_sender.py               # 本地联调用的 Lite3 数据模拟器
@@ -168,7 +186,87 @@ uvicorn : The term 'uvicorn' is not recognized as the name of a cmdlet...
 
 ---
 
-## 五、接口说明
+## 五、部署到 103 感知导航主机
+
+> 正式运行环境：**103（Jetson Xavier NX，Ubuntu 20.04 / Python 3.8，用户 `ysc`，IP 192.168.1.103）**
+> 安装目录：`/home/ysc/test/monitor`　详细运维与排错见 [`deploy/README.md`](deploy/README.md)。
+
+### 5.1 为什么不能直接在 103 上 bind 43897
+
+103 的 UDP **43897 已被 `transfer_ros2` 独占**。UDP 单播端口被两个进程同时 bind 时，
+Linux **不会**给两份拷贝——后 bind 的会把报文抢走：
+
+```
+Monitor 抢走 43897 → transfer_ros2 收不到状态
+                   → leg_odom2 / /imu/data 断流
+                   → Nav2 失去本体里程计
+```
+
+因此 103 上默认使用 **旁路抓包（sniff）**：用 `AF_PACKET` 从链路层读取流经网卡的报文，
+**不 bind 任何端口**，与 `transfer_ros2` 完全共存。
+
+### 5.2 两种接收模式
+
+| 模式 | 环境要求 | 占用 43897 | 适用 |
+| --- | --- | --- | --- |
+| `sniff` | Linux + `CAP_NET_RAW` | 否 | **103 部署（推荐）** |
+| `bind` | 任意 | 是 | Windows 开发机、无 root 权限时 |
+
+`LITE3_UDP_MODE=auto`（默认）优先 sniff，失败自动退回 bind。
+当前生效模式可通过 `GET /api/status` 的 `udp_mode` 字段确认。
+
+### 5.3 部署步骤
+
+```bash
+# 1) 笔记本：构建前端（Jetson 上 npm build 很慢，建议本地构建后传产物）
+cd frontend && npm run build
+
+# 2) 笔记本：打包（自动剔除 node_modules，几百 MB → 几十 KB）
+bash deploy/pack.sh
+scp lite3-monitor-deploy.tar.gz ysc@192.168.1.103:/tmp/
+
+# 3) 103：解压并安装（自动建 venv、装依赖、抓包自检、注册 systemd 并启动）
+ssh ysc@192.168.1.103
+cd /tmp && tar xzf lite3-monitor-deploy.tar.gz
+sudo bash lite3_robot_monitor/deploy/install.sh /home/ysc/test/monitor
+```
+
+内网 pip 源：
+
+```bash
+PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple sudo -E bash deploy/install.sh /home/ysc/test/monitor
+```
+
+安装脚本只做「安装与注册」，**不改动** `transfer_ros2`、`jy_exe` 及任何现有配置。
+
+### 5.4 验证
+
+```bash
+curl http://127.0.0.1:8000/api/status
+```
+
+| 字段 | 期望值 | 含义 |
+| --- | --- | --- |
+| `udp_mode` | `sniff` | 旁路抓包生效，未占用 43897 |
+| `connected` | `true` | 已收到机器人状态 |
+| `packets_received` | 持续增长 | 数据链路正常 |
+
+笔记本浏览器打开 `http://192.168.1.103:8000` 即可看到面板。
+
+### 5.5 常见问题
+
+| 现象 | 处理 |
+| --- | --- |
+| `udp_mode` 是 `bind` | 抓包降级了，`journalctl -u lite3-monitor -n 50` 看权限错误 |
+| 日志报 `PermissionError` | 确认 unit 中 `AmbientCapabilities=CAP_NET_RAW`，或改 `User=root` |
+| `connected` 一直 false | 先确认 103 有没有收到：`sudo tcpdump -i any -nn udp dst port 43897 -c 5` |
+| 抓到无关流量太多 | 设置 `LITE3_UDP_IFACE` 为业务网网卡名（连 `192.168.1.120` 的那张） |
+
+完整排错表与回滚步骤见 [`deploy/README.md`](deploy/README.md)。
+
+---
+
+## 六、接口说明
 
 ### WebSocket
 
@@ -213,14 +311,16 @@ uvicorn : The term 'uvicorn' is not recognized as the name of a cmdlet...
 
 ---
 
-## 六、配置项
+## 七、配置项
 
 所有参数集中在 `backend/config.py`，可用环境变量覆盖：
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `LITE3_UDP_HOST` | `0.0.0.0` | UDP 监听地址 |
-| `LITE3_UDP_PORT` | `43897` | UDP 监听端口（需与 Lite3 发送目标端口一致） |
+| `LITE3_UDP_PORT` | `43897` | 目标 UDP 端口（需与 Lite3 发送目标端口一致） |
+| `LITE3_UDP_MODE` | `auto` | 接收模式：`auto` / `sniff`（旁路抓包）/ `bind`（绑定端口） |
+| `LITE3_UDP_IFACE` | 空 | 旁路抓包监听的网卡名，留空为全部网卡；建议填业务网网卡 |
 | `LITE3_UDP_BUFFER` | `2048` | 单次接收缓冲区大小 |
 | `LITE3_UDP_QUEUE` | `1024` | 接收队列容量，满时丢弃最旧数据 |
 | `LITE3_HTTP_HOST` | `0.0.0.0` | HTTP 监听地址 |
@@ -230,12 +330,20 @@ uvicorn : The term 'uvicorn' is not recognized as the name of a cmdlet...
 | `LITE3_RAW_HISTORY` | `30` | 原始报文环形缓存条数 |
 | `LITE3_LOG_LEVEL` | `INFO` | 日志级别 |
 | `LITE3_SERVE_FRONTEND` | `true` | 是否挂载 `frontend/dist` |
+| `LITE3_CTRL_IP` | `192.168.1.120` | 控制指令目标 IP（运动主机；WiFi 网段 2 时为 `192.168.2.1`） |
+| `LITE3_CTRL_PORT` | `43893` | 控制指令目标端口 |
+| `LITE3_CTRL_HEARTBEAT` | `0.25` | 心跳周期（秒），文档要求频率 ≥ 2Hz |
+| `LITE3_CTRL_LEASE` | `5.0` | 心跳租约（秒），前端失联后自动停心跳并下发零速 |
+| `LITE3_CTRL_MAX_LINEAR` | `1.0` | 前后线速度硬上限（m/s），文档取值 ±1.0 |
+| `LITE3_CTRL_MAX_LINEAR_Y` | `0.5` | 左右线速度硬上限（m/s），文档仅允许 ±0.5 |
+| `LITE3_CTRL_MAX_ANGULAR` | `1.5` | 角速度硬上限（rad/s） |
+| `LITE3_CTRL_ENABLED` | `false` | 启动即启用控制通道（**建议保持 false**） |
 
 前端可通过 `VITE_BACKEND_URL` 指定后端地址（跨域直连模式）。
 
 ---
 
-## 七、本机无机器人时的联调
+## 八、本机无机器人时的联调
 
 使用内置模拟器向本机发送符合协议的数据：
 
@@ -259,7 +367,7 @@ python tools/smoke_test.py
 
 ---
 
-## 八、验收对照
+## 九、验收对照
 
 | 验收项 | 结果 |
 | --- | --- |
@@ -270,7 +378,7 @@ python tools/smoke_test.py
 
 ---
 
-## 九、后续扩展预留
+## 十、后续扩展预留
 
 | 方向 | 建议接入位置 |
 | --- | --- |
@@ -283,79 +391,136 @@ python tools/smoke_test.py
 
 ---
 
-## 十、注意事项
+## 十一、注意事项
 
-1. 本系统**只读**，不会向机器人发送任何运动控制指令；
-2. 关节名称默认按 `FR / FL / RR / RL` 四腿、每腿 `hip / thigh / calf` 排列，若与实际 SDK 顺序不符，修改 `backend/config.py` 中的 `DisplayConfig` 即可；
+1. 监控（读取状态）部分**只读**；控制指令需**显式启用通道**后才会下发，默认关闭（见第十二章），且会绕过 VOA 安全层；
+2. 关节顺序依据文档 1.3.2：**左前 → 右前 → 左后 → 右后**（LF/RF/LB/RB），每腿 `hip_x`（侧摆）/`hip_y`（髋）/`knee`（膝）；如固件不同，改 `backend/config.py` 的 `DisplayConfig` 即可；
 3. `0x0901` 中的 `touch_down_and_stair_trot`、`is_charging`、`error_state`、`task_state` 在部分固件版本上为无效值，界面已做弱化处理但仍完整透传。
+4. **Python 版本**：代码面向 **3.8**（103 的 Ubuntu 20.04），未使用 3.9+ 的内置泛型与 3.10+ 的 `X | None` 语法；新增代码请保持该兼容级别，否则 103 上会启动失败；
+5. **103 上不要强制 bind 43897**：会抢走 `transfer_ros2` 的报文，导致 Nav2 失去里程计。如需 bind，请先用 `sudo ss -lunp | grep 43897` 确认端口确实空闲。
 
 ---
 
-## 十一、控制通道（写方向）：为什么现在没有，以及该怎么做
+## 十二、控制通道（写方向）
 
-### 11.1 读写是两条完全不同的链路
+> ⚠️ **风险提示**：控制指令直连运动主机上的闭源 `jy_exe`（`192.168.1.120:43893`），
+> **不经过 103 侧的 VOA 安全层**（限速、避障、防撞均不生效）。
+> 务必在开阔场地、机器人架空或有人持遥控器待命时使用。
 
-| 方向 | 端口 | 谁监听 | 协议 | 本项目状态 |
-| --- | --- | --- | --- | --- |
-| **读**（状态上报） | UDP **43897** | 103（`transfer_ros2`） | 半公开：`0x0901/0x0902/0x0903` | 已实现 |
-| **写**（运动控制） | UDP **43893** | 120（`jy_exe`，闭源） | 私有，未公开 | **刻意未实现** |
+### 12.1 协议来源
 
-监控面板上的按钮只能切页面，不可能"顺便"让狗动起来——后端根本没有打开写方向的 socket。
+依据**厂商文档《运动主机 UDP 通讯接口》**，摘录已存档于
+[`docs/protocol/lite3-udp-protocol.md`](docs/protocol/lite3-udp-protocol.md)（含 1.1 协议格式、1.2 控制指令集、1.3 接收指令集）。
 
-⚠️ 注意：120 上 `43899`、`43901` 也在监听，属于私有扩展端口，不要试探。
+### 12.2 报文格式（文档 1.1 节）
 
-### 11.2 三条可选路径（按风险从低到高）
+```cpp
+// 简单指令：12 字节，type = 0
+struct CommandHead {
+    uint32_t code;            // xxxx 指令码
+    uint32_t paramters_size;  // yyyy 指令值；无有效指令值时为 0
+    uint32_t type;            // zzzz = 0
+};
 
-| 路径 | 做法 | 安全层 | 风险 |
-| --- | --- | --- | --- |
-| **A. 走 ROS 2（推荐）** | 后端 publish `/cmd_vel` → 103 上现有 `transfer_ros2` / `jetson2motion` 转成 43893 发给 120 | ✅ 经 **VOA SafetyController**，会限速、避障、防撞 | 需与 Nav2 争 `/cmd_vel`，要用 mux 做模式互斥 |
-| **B. 复用 103 侧的组包逻辑** | 读 103 上 `transfer_ros2` 自己的源码（不是逆向闭源 `jy_exe`），把那几行组包代码搬到后端 | ❌ 绕过 VOA | 错误速度无人兜底，直接驱动关节 |
-| **C. 抓包逆向 43893** | 用 `tools/inspect_control_packets.py` 差分推断字段 | ❌ 绕过 VOA | 最慢；可能带校验/时间戳，重放失败 |
-
-**结论：只有路径 A 不会拆掉已有的安全防线。** 你们自己的笔记也写了不建议对 `jy_exe` 做协议级联动。
-
-### 11.3 侦查流程（无论走哪条路，都建议先看清报文）
-
-```bash
-# 1) 在 103 上抓自己发出的控制包（103 → 120:43893 出向包，零侵入）
-sudo tcpdump -i any -nn udp dst port 43893 -w /tmp/ctrl.pcap -c 300
-#    抓的同时，让机器人缓慢改变速度，制造可比较的报文序列
-
-# 2) 列出报文，观察长度与头部
-python tools/inspect_control_packets.py list /tmp/ctrl.pcap --port 43893
-
-# 3) 相邻帧逐字节差分，自动定位"哪几个偏移随速度变化"
-python tools/inspect_control_packets.py diff /tmp/ctrl.pcap --port 43893
+// 复杂指令：12 + N 字节，type = 1
+struct Command {
+    CommandHead head;         // yyyy = 数据长度
+    uint32_t data[kDataSize]; // bbbb… 数据内容
+};
 ```
 
-`diff` 会按偏移区间给出变化频率，并直接用多种数值格式试解（float32/float64/整型，大小端），例如：
+- **字节序**：小端。文档附录实例 `0209 0000 | 6000 0000 | 0100 0000` 即
+  `code=0x0902`、`paramters_size=0x60(96)`、`type=1`，报文总长 108 字节
+- **发送长度**：`sizeof(head) + paramters_size`
+- **校验**：简单/复杂指令均**无校验字段**
+
+> 早前版本曾据 `Lite3_ROS` 源码把头部第 2、3 字段理解为 `cmd_value` / `sequence`，
+> 现据厂商文档更正为 `paramters_size` / `type`。
+
+### 12.3 控制指令集（文档 1.2 节，共 31 条预置）
+
+| 分组 | 指令 | 指令码 | type |
+| --- | --- | --- | --- |
+| **状态** | 起立/趴下（轮流切换） | `0x21010202` | 0 |
+| | 回零 | `0x21010C05` | 0 |
+| | 进入 AI / 退出 AI | `0x21010528` / `0x2101052B` | 0 |
+| | 软急停 | `0x21020C0E` | 0 |
+| **模式** | 原地模式 / 移动模式 | `0x21010D05` / `0x21010D06` | 0 |
+| | **自主模式** / 手动模式 | `0x21010C03` / `0x21010C02` | 0 |
+| **步态** | 平地低速 / 中速 / 高速 | `0x21010300` / `0x21010307` / `0x21010303` | 0 |
+| | 正常/匍匐（轮换） | `0x21010406` | 0 |
+| | 通用越障 / 抓地越障 / 高踏步越障 | `0x21010401` / `0x21010402` / `0x21010407` | 0 |
+| **动作** | 扭身体 / 太空步 / 扭身跳 | `0x21010204` / `0x2101030C` / `0x2101020D` | 0 |
+| | 翻身 / 向前跳 / 后空翻 / 打招呼 | `0x21010205` / `0x2101050B` / `0x21010502` / `0x21010507` | 0 |
+| | 停止动作（需连发指令值 0 和 1） | `0x21010C0B` | 0 |
+| **AI** | AI 基础 / 跳跃 / 站立 / 极速步态 | `0x2101052A` / `0x21010529` / `0x2101052C` / `0x2101052E` | 0 |
+| **其他** | 持续运动（-1 开 / 2 关） | `0x21010C06` | 0 |
+| | 保存数据 | `0x21010C01` | 0 |
+| **心跳** | 心跳包 | `0x21040001` | 0 |
+
+速度指令（文档 1.2.12，复杂指令，**需在自主模式下发送**）：
+
+| 指令 | 指令码 | 数据范围 |
+| --- | --- | --- |
+| 前后平移 | `0x0140` | ±1.0 m/s（正值前进） |
+| 左右平移 | `0x0145` | ±0.5 m/s（**正值向右**） |
+| 旋转角速度 | `0x0141` | ±1.5 rad/s（**正值向右转**） |
+
+轴指令（文档 1.2.3，简单指令，值为 int32 原始量）：前后 `0x21010130`（±6553）、
+左右 `0x21010131`（±12553）、转向 `0x21010135`（±9553）；
+文档要求**下发频率 ≥ 20Hz，超时 250ms 后机器人自动停止运动**。
+
+### 12.4 心跳机制
+
+| 项 | 取值 | 依据 |
+| --- | --- | --- |
+| 心跳指令码 | `0x21040001`（简单指令，type=0） | 文档 1.2.1 |
+| 心跳周期 | `0.25s`（4Hz） | 文档要求 **≥ 2Hz** |
+| 心跳内容 | 心跳包 + 当前速度指令（非零时重发） | 避免速度超时失效 |
+| 租约 | `5s`，前端失联后自动停心跳并补发零速 | 本工程安全加固 |
+| 页面关闭 | `beforeunload` + `sendBeacon` | 主动通知；失败由租约兜底 |
+| 组件卸载 | `onUnmounted` 清定时器 + 停心跳 | 防资源泄漏 |
+| 服务退出 | FastAPI `lifespan` → `control.close()` | 停心跳 → 零速 → 关 socket |
+
+三层保护确保**不会出现后台持续发送**。
+
+### 12.5 已实现的安全约束
+
+1. **默认禁用**：`LITE3_CTRL_ENABLED=false`，需显式 `/api/control/enable`
+2. **后端硬限幅**：前后 ±1.0、左右 ±0.5、旋转 ±1.5（按文档取值，不信任前端）
+3. **急停**：停心跳 → 连发零速 → 发厂商**软急停** `0x21020C0E` → 锁定后续指令
+4. **危险动作二次确认**：后空翻 / 向前跳 / 扭身跳 / 翻身等在界面需确认后才下发
+5. **心跳租约**：前端消失自动停止并补发零速
+6. **审计日志**：每条报文含指令码、参数、时间戳，`GET /api/control/audit`
+7. **错误处理**：参数非法、未启用、网络异常均返回结构化错误
+
+**仍需人工遵守**：人与机器人保持 5 米距离 / 首次测试架空 / 遥控器随时可接管。
+
+### 12.6 控制接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/control/status` | 启用状态、急停、心跳、发包计数 |
+| GET | `/api/control/presets` | 指令表（含分组、指令码、危险标记） |
+| POST | `/api/control/enable` / `disable` | 启用 / 停用控制通道 |
+| POST | `/api/control/velocity` | 速度 `{x, y, yaw}` |
+| POST | `/api/control/preset` | 按名称下发预置指令 |
+| POST | `/api/control/custom` | 自定义报文（code/value/type/data） |
+| POST | `/api/control/raw` | 原始十六进制报文 |
+| POST | `/api/control/stop` | 零速停止 |
+| POST | `/api/control/estop` / `estop/clear` | 急停（含软急停指令）/ 解除 |
+| POST | `/api/control/heartbeat/start` / `stop` / `renew` | 心跳控制 |
+| GET | `/api/control/audit` | 指令审计记录 |
+
+### 12.7 典型使用顺序
 
 ```text
-  区间          帧数占比   候选解码（取最后一帧）
-  0008           100.0%   i32_le=+29.0000      ← 每帧必变，序号
-  0012-0015      100.0%   f32_le=+2.9000       ← 随操作有界变化，速度
-  0020-0027       96.6%   f64_le=+1.4500       ← 角速度
+1) 启用控制通道
+2) 起立/趴下（0x21010202）→ 让机器人起立
+3) 切「自主模式」（0x21010C03）← 关键：否则速度指令无效
+4) 开启心跳（0x250ms 周期，含 0x21040001）
+5) 发送速度指令（0x0140 / 0x0145 / 0x0141）
+6) 停止移动 → 停止心跳 → 停用控制通道
 ```
 
-拿到结果后**必须与实际操作对照确认**，确认无误才能写进 `parser.py`。
-
-如需验证某个猜想，可用 `send` 子命令，默认 dry-run：
-
-```bash
-python tools/inspect_control_packets.py send "010a0000 dc000000 05000000 cccc3d40" --port 43893
-```
-
-### 11.4 万一将来要加控制，必须先具备的安全约束
-
-按重要性排序，缺一项都不建议开放写通道：
-
-1. **默认禁用**：配置项显式开启才下发，默认 `CONTROL_ENABLED=false`；
-2. **强制 deadman**：前端必须持续按住才发速度，松手立即下发零速（不能只靠超时兜底）；
-3. **心跳超时归零**：超过 200~300ms 没收到前端心跳，后端自动持续下发零速；
-4. **速度硬限幅**：在**后端**再夹一次上下限（不能只信前端），建议初始 ±0.3 m/s、±0.5 rad/s；
-5. **独立急停**：一个不经常规指令路径的急停端点，直接广播零速并锁死；
-6. **模式互斥**：手动控制与 Nav2 自动导航互斥，禁止同时写 `/cmd_vel`；
-7. **审计日志**：每条下发的速度指令带时间戳落盘，便于事后复盘；
-8. **现场有人**：首轮测试在开阔场地、有人持遥控器准备接管，机器人先架空或垫起。
-
-在此之前，本工程保持只读是**特性，不是缺陷**。
+---

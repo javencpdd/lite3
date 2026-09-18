@@ -7,6 +7,7 @@
 
 import { ref, shallowRef, onMounted, onUnmounted } from 'vue'
 import { StateSocket, fetchRaw, fetchStatus } from '../api/index.js'
+import { toast } from './useToast.js'
 
 /** IMU 曲线窗口：保留 30 秒 @10Hz */
 const HISTORY_POINTS = 300
@@ -30,6 +31,14 @@ export function useRobotState() {
   const rawPackets = ref([])
   /** 最近一次收到数据的时间（前端本地 ms） */
   const lastPacketAt = ref(0)
+  /**
+   * 后端 REST 是否不可达。
+   * 关键：/api/status 拉取失败时若保留上一次的结果，页面会继续显示旧的 "Online"
+   * 和旧的计数，用户会误以为一切正常。这里显式标记不可达，供 UI 降级显示。
+   */
+  const apiError = ref(false)
+  /** 连续失败次数：达到阈值才判定不可达，避免单次网络抖动误报 */
+  let statusFailures = 0
 
   let socket = null
   let statusTimer = null
@@ -61,7 +70,19 @@ export function useRobotState() {
   async function refreshStatus() {
     try {
       serviceStatus.value = await fetchStatus()
+      if (statusFailures !== 0) statusFailures = 0
+      // 从不可达状态恢复时提示一次，让用户知道链路已自愈
+      if (apiError.value) {
+        apiError.value = false
+        toast.success('后端服务已恢复连接')
+      }
     } catch (err) {
+      statusFailures += 1
+      // 连续 2 次失败才判定不可达：单次失败更可能是瞬时抖动
+      if (statusFailures >= 2 && !apiError.value) {
+        apiError.value = true
+        toast.error('后端服务不可达，页面状态可能已过期')
+      }
       console.warn('[useRobotState] 获取服务状态失败', err)
     }
   }
@@ -97,8 +118,12 @@ export function useRobotState() {
     clearInterval(rawTimer)
   })
 
-  /** 机器人链路是否在线：以服务端判定结果为准 */
-  const connected = () => Boolean(serviceStatus.value?.connected)
+  /**
+   * 机器人链路是否在线。
+   * 注意：后端不可达时 serviceStatus 是最后一次成功的快照，其值不可信，
+   * 必须按离线处理，否则会出现"服务已挂、页面仍显示 Online"的误导。
+   */
+  const connected = () => Boolean(!apiError.value && serviceStatus.value?.connected)
 
   return {
     robotState,
@@ -110,6 +135,7 @@ export function useRobotState() {
     serviceStatus,
     rawPackets,
     lastPacketAt,
+    apiError,
     connected,
     refreshRaw,
     refreshStatus,

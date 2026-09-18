@@ -13,3 +13,5 @@ frontend/dist/
 *.log
 .env
 .env.local
+
+.joycode/

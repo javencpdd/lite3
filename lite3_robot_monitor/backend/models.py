@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -147,7 +147,8 @@ class ServiceStatus(BaseModel):
     last_update: Optional[float] = Field(None, description="最后一次收到 UDP 数据的时间戳（秒）")
     since_last_update: Optional[float] = Field(None, description="距最后一次收到数据的间隔（秒）")
     udp_running: bool = False
-    udp_mode: str = Field("bind", description="接收模式：sniff（旁路抓包）或 bind（绑定端口）")
+    udp_mode: str = Field("bind", description="接收模式：ros / sniff（旁路抓包） / bind（绑定端口）")
+    data_source: str = Field("none", description="当前生效的数据源模式：ros / sniff / bind / none")
     udp_host: str = ""
     udp_port: int = 0
     packets_received: int = 0
@@ -175,6 +176,56 @@ class RawPacketResponse(BaseModel):
     items: List[RawPacketItem] = Field(default_factory=list)
 
 
+# ----------------------------------------------------------------------
+# 控制通道（写方向）相关模型
+# ----------------------------------------------------------------------
+class VelocityCommand(BaseModel):
+    """速度指令：与 /cmd_vel 语义一致。"""
+    x: float = Field(0.0, description="前后线速度，正值前进（m/s）")
+    y: float = Field(0.0, description="左右线速度，正值左移（m/s）")
+    yaw: float = Field(0.0, description="转向角速度，正值左转（rad/s）")
+
+
+class PresetCommandRequest(BaseModel):
+    """按名称下发预置指令。"""
+    name: str = Field(..., description="预置指令名，如 前进 / 后退 / 左转")
+
+
+class CustomCommandRequest(BaseModel):
+    """自定义指令报文。
+
+    传 `data` 时按 ComplexCMD(20B) 发送，否则按 SimpleCMD(12B) 发送。
+    """
+    cmd_code: int = Field(..., description="命令码，如 320/325/321/503")
+    cmd_value: int = Field(0, description="命令值，速度类固定为 8")
+    type: int = Field(0, description="类型，速度类为 1，简单指令为 0")
+    data: Optional[float] = Field(None, description="ComplexCMD 的 double 数据")
+
+
+class RawHexRequest(BaseModel):
+    """完全自定义的原始十六进制报文。"""
+    hex: str = Field(..., description="十六进制串，如 '55 66 00 20' 或 '55660020'")
+
+
+class ControlStatus(BaseModel):
+    """控制服务状态。"""
+    enabled: bool = False
+    estop: bool = False
+    heartbeat_running: bool = False
+    heartbeat_interval: float = 0.25
+    heartbeat_lease: float = 5.0
+    lease_remaining: float = 0.0
+    target: str = ""
+    current_velocity: VelocityCommand = Field(default_factory=VelocityCommand)
+    limits: Dict[str, float] = Field(default_factory=dict)
+    sent_packets: int = 0
+    failed_packets: int = 0
+    last_sent_at: Optional[float] = None
+    last_error: Optional[str] = None
+
+    model_config = ConfigDict(extra="allow")
+
+
 __all__ = [
     "SourceInfo",
     "Vector3",
@@ -188,4 +239,9 @@ __all__ = [
     "ServiceStatus",
     "RawPacketItem",
     "RawPacketResponse",
+    "VelocityCommand",
+    "PresetCommandRequest",
+    "CustomCommandRequest",
+    "RawHexRequest",
+    "ControlStatus",
 ]
