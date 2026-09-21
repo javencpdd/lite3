@@ -15,6 +15,8 @@ import RobotStatus from './components/RobotStatus.vue'
 import IMUChart from './components/IMUChart.vue'
 import JointPanel from './components/JointPanel.vue'
 import RawPacket from './components/RawPacket.vue'
+import SentPacket from './components/SentPacket.vue'
+import RosInfoTip from './components/RosInfoTip.vue'
 import ControlPanel from './components/ControlPanel.vue'
 import ToastHost from './components/ToastHost.vue'
 import { useRobotState } from './composables/useRobotState.js'
@@ -139,6 +141,11 @@ const health = computed(() => {
  */
 const tab = ref('monitor')
 
+/** 当前生效数据源模式：ros / sniff / bind / none（决定 ROS 提示是否有意义） */
+const dataSource = computed(() => serviceStatus.value?.data_source || '')
+/** 数据是否确实由 ros_bridge 转发（ros_bridge_node 会打上 source.ip = 'ros_bridge'） */
+const fromRos = computed(() => robotState.value?.source?.ip === 'ros_bridge')
+
 async function handleClear() {
   try {
     await clearRaw()
@@ -204,7 +211,10 @@ async function handleClear() {
             </div>
 
             <div class="metric-group">
-              <div class="group-title">Position (world)</div>
+              <div class="group-title">
+              Position (world)
+              <RosInfoTip area="odom" :source="dataSource" :from-ros="fromRos" />
+            </div>
               <div class="metric-row">
                 <div class="metric"><span>X</span><b class="mono">{{ fmt(position.x) }} m</b></div>
                 <div class="metric"><span>Y</span><b class="mono">{{ fmt(position.y) }} m</b></div>
@@ -213,7 +223,10 @@ async function handleClear() {
             </div>
 
             <div class="metric-group">
-              <div class="group-title">Velocity (world)</div>
+              <div class="group-title">
+              Velocity (world)
+              <RosInfoTip area="odom" :source="dataSource" :from-ros="fromRos" />
+            </div>
               <div class="metric-row">
                 <div class="metric"><span>Vx</span><b class="mono">{{ fmt(velocity.x) }} m/s</b></div>
                 <div class="metric"><span>Vy</span><b class="mono">{{ fmt(velocity.y) }} m/s</b></div>
@@ -222,7 +235,10 @@ async function handleClear() {
             </div>
 
             <div class="metric-group">
-              <div class="group-title">Velocity (body)</div>
+              <div class="group-title">
+              Velocity (body)
+              <RosInfoTip area="odom" :source="dataSource" :from-ros="fromRos" />
+            </div>
               <div class="metric-row">
                 <div class="metric"><span>Vx</span><b class="mono">{{ fmt(velocityBody.x) }} m/s</b></div>
                 <div class="metric"><span>Vy</span><b class="mono">{{ fmt(velocityBody.y) }} m/s</b></div>
@@ -231,7 +247,10 @@ async function handleClear() {
             </div>
 
             <div class="metric-group">
-              <div class="group-title">IMU Acceleration</div>
+              <div class="group-title">
+              IMU Acceleration
+              <RosInfoTip area="imu" :source="dataSource" :from-ros="fromRos" />
+            </div>
               <div class="metric-row">
                 <div class="metric"><span>Ax</span><b class="mono">{{ fmt(acc.x_acc) }} m/s²</b></div>
                 <div class="metric"><span>Ay</span><b class="mono">{{ fmt(acc.y_acc) }} m/s²</b></div>
@@ -250,19 +269,31 @@ async function handleClear() {
           </section>
         </div>
 
-        <JointPanel :angle="jointAngle" :velocity="jointVelocity" />
+        <JointPanel
+          :angle="jointAngle"
+          :velocity="jointVelocity"
+          :data-source="dataSource"
+          :from-ros="fromRos"
+        />
 
+        <!-- 收包（机器人 → 本机）只放在监控页 -->
         <RawPacket :packets="rawPackets" @refresh="refreshRaw" @clear="handleClear" />
       </template>
 
-      <template v-else>
+      <!-- 用 v-show 而不是 v-if：切换标签时 ControlPanel **不能**被卸载，
+           否则会触发它的 onUnmounted，把正在运行的心跳停掉。 -->
+      <div v-show="tab === 'console'" class="console-pane">
         <div class="console-warn">
           操作台为<strong>写方向</strong>通道：下发的指令会直接驱动机器人。
           请确认周围人员已撤离、机器人处于安全姿态，异常时优先点击「急停」。
         </div>
 
         <ControlPanel />
-      </template>
+
+        <!-- 发包（本机 → 机器人）放在操作台：与"下发指令"同属写方向，语义上是一组。
+             用的是 PacketMonitor 公共组件（SentPacket 只是它的预置配置封装）。 -->
+        <SentPacket />
+      </div>
     </main>
 
     <footer class="footer">
@@ -410,6 +441,12 @@ async function handleClear() {
   height: 7px;
   border-radius: 50%;
   background: #dc2626;
+}
+
+.console-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .console-warn {

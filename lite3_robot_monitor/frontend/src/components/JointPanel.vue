@@ -4,12 +4,17 @@
  * 12 个关节的角度（rad / deg）与角速度展示。
  */
 import { computed } from 'vue'
+import RosInfoTip from './RosInfoTip.vue'
 
 const props = defineProps({
   /** 0x0902 关节角度对象 */
   angle: { type: Object, default: null },
   /** 0x0903 关节角速度对象 */
-  velocity: { type: Object, default: null }
+  velocity: { type: Object, default: null },
+  /** 当前生效数据源：ros / sniff / bind（供 ROS 提示判定） */
+  dataSource: { type: String, default: '' },
+  /** 数据是否由 ros_bridge 转发 */
+  fromRos: { type: Boolean, default: false }
 })
 
 /** 关节名称，后端未提供时退化为 joint_N */
@@ -47,7 +52,10 @@ function percent(rad) {
 <template>
   <section class="card">
     <div class="card-title">
-      <span>Joint / 12 DOF</span>
+      <span>
+        Joint / 12 DOF
+        <RosInfoTip area="joint" :source="dataSource" :from-ros="fromRos" />
+      </span>
       <span class="sub">角度 {{ angle?.unit || 'rad' }} · 角速度 {{ velocity?.unit || 'rad/s' }}</span>
     </div>
 

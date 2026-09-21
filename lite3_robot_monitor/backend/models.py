@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -220,8 +220,13 @@ class ControlStatus(BaseModel):
     limits: Dict[str, float] = Field(default_factory=dict)
     sent_packets: int = 0
     failed_packets: int = 0
+    # 心跳与业务分开累计（心跳 4Hz 会淹没合并计数）
+    heartbeat_packets: int = 0
+    business_packets: int = 0
     last_sent_at: Optional[float] = None
     last_error: Optional[str] = None
+    last_modes: Dict[str, Any] = {}
+    velocity_invert: Dict[str, bool] = {}
 
     model_config = ConfigDict(extra="allow")
 

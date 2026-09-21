@@ -9,13 +9,29 @@
 ## 一、架构总览
 
 ```text
-Lite3 机器人本体
-      │  UDP 二进制报文 (0x0901 / 0x0902 / 0x0903)
+Lite3 机器人本体（120 运动主机）
+      │
+      ├─── UDP 二进制报文 (0x0901 / 0x0902 / 0x0903) ───┐
+      │                                                │
+      │    ① sniff        AF_PACKET 旁路抓包，不占端口   │
+      │    ② bind         bind 43897（无 CAP_NET_RAW 时兜底）│
+      │                                                │
+      └─── transfer_ros2（官方节点：UDP → ROS topic）────┤
+                /leg_odom2  /imu/data  /joint_states    │
+                  │                                     │
+                  ├─ ③ ros         ros_bridge_node.py 独立进程
+                  │                → 本地 UDP JSON :43900
+                  └─ ④ ros_direct  ros_direct_source.py 内嵌 rclpy 订阅
+                                                        │
+      ┌─────────────────────────────────────────────────┘
       ▼
+┌─────────── data_source.py：四种数据源统一接口 ───────────┐
+│  raw 帧（sniff / bind，需 parser）                       │
+│  parsed 帧（ros / ros_direct，已是结构化 dict）          │
+│  auto：ros 系为主 + sniff 兜底，双向自愈                 │
+└───────────────────────────┬─────────────────────────────┘
+                            ▼
 ┌──────────────────────── Backend (FastAPI) ────────────────────────┐
-│  udp_sniffer.py    103：AF_PACKET 旁路抓包，不占端口、不影响现有服务 │
-│  udp_receiver.py   开发机：bind 端口，后台线程收发写队列             │
-│        ▼                                                           │
 │  parser.py         bytes → 结构化 dict（协议逻辑与原脚本一致）       │
 │        ▼                                                           │
 │  state_manager.py  保存最新状态 + 原始报文环形缓存 + 在线判定        │
@@ -32,7 +48,9 @@ Lite3 机器人本体
 │  RobotStatus.vue   状态 / 步态 / 电池 / 连接                        │
 │  IMUChart.vue      Roll / Pitch / Yaw 实时曲线（ECharts）           │
 │  JointPanel.vue    12 个关节角度与角速度                            │
-│  RawPacket.vue     原始 UDP 报文十六进制预览                        │
+│  RawPacket.vue     接收侧原始 UDP 报文十六进制预览                  │
+│  SentPacket.vue    发包监控：code / 指令值 / type / data 结构化展示  │
+│  ControlPanel.vue  预置指令 / 速度 / 自定义报文 / 摇杆               │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -43,7 +61,8 @@ Lite3 机器人本体
 | 协议不变 | 完全沿用原脚本的消息码、struct 格式与字段顺序，未删减任何字段 |
 | 去 GUI | 不再依赖 Tkinter，UDP 线程与 Web 事件循环彻底解耦 |
 | 单一职责 | 接收、解析、状态管理、接口、展示分别独立成模块 |
-| 可扩展 | 预留视频、AI 检测、ROS2 桥接的接入位置 |
+| 数据源可换 | sniff / bind / ros / ros_direct 统一接口，运行时可切（见第五节与 `docs/ros_bridge.md`） |
+| 可扩展 | 视频、AI 检测等新能力只需加模块 + 接口，不动收发骨架 |
 | **零侵入** | 103 上走旁路抓包，与 `transfer_ros2` 共存，不抢 43897（见第五节） |
 | **3.8 兼容** | 面向 103 的 Ubuntu 20.04 / Python 3.8，未使用 3.9+ 语法 |
 
@@ -54,52 +73,69 @@ Lite3 机器人本体
 ```text
 lite3_robot_monitor/
 ├── backend/
-│   ├── main.py            # FastAPI 入口：REST + WebSocket
-│   ├── udp_receiver.py    # UDP 接收线程 + 队列（含丢包统计）
-│   ├── parser.py          # 0x0901 / 0x0902 / 0x0903 协议解析
-│   ├── state_manager.py   # 最新状态仓库 + 原始报文缓存 + 在线判定
-│   ├── models.py          # Pydantic 响应模型
-│   ├── config.py          # 集中配置，支持环境变量覆盖
-│   ├── udp_sniffer.py     # 旁路抓包接收器（Linux AF_PACKET，不占端口，103 专用）
-│   ├── control_protocol.py # 控制报文构造（SimpleCMD / ComplexCMD / 手柄帧）
-│   ├── control_service.py  # 指令发送、心跳保活、急停、限幅与审计
+│   ├── main.py              # FastAPI 入口：REST + WebSocket + 数据源看门狗
+│   ├── config.py            # 集中配置（frozen dataclass），支持环境变量覆盖
+│   ├── models.py            # Pydantic 响应模型
+│   │
+│   │   # ---- 状态读取（读方向）----
+│   ├── data_source.py       # 数据源抽象：sniff / bind / ros / ros_direct 统一接口
+│   ├── udp_receiver.py      # UDP 接收线程 + 队列（bind 模式，含丢包统计）
+│   ├── udp_sniffer.py       # 旁路抓包接收器（Linux AF_PACKET，不占端口，103 专用）
+│   ├── parser.py            # 0x0901 / 0x0902 / 0x0903 协议解析
+│   ├── state_manager.py     # 最新状态仓库 + 原始报文缓存 + 在线判定
+│   ├── ros_bridge_node.py   # 独立桥接进程：订阅 ROS topic → 本地 UDP JSON
+│   ├── ros_direct_source.py # 内嵌订阅数据源：本进程直接 import rclpy 订阅 topic
+│   ├── ros_topic_adapter.py # ROS 消息 → 状态字典 的纯转换（两种 ros 模式共用）
+│   │
+│   │   # ---- 控制下发（写方向）----
+│   ├── control_protocol.py  # 控制报文构造 + 结构化解析（describe_packet）
+│   ├── control_service.py   # 指令发送、心跳保活、急停、限幅与审计
 │   └── requirements.txt
-├── docs/protocol/
-│   └── lite3-udp-protocol.md  # 厂商《运动主机 UDP 通讯接口》摘录存档
+├── docs/
+│   ├── protocol/
+│   │   └── lite3-udp-protocol.md  # 厂商《运动主机 UDP 通讯接口》摘录存档
+│   ├── ros_bridge.md              # ROS 数据源部署：桥接模式 + 内嵌订阅模式
+│   └── ros_troubleshooting.md     # ROS 数据源排查手册（含页面自检面板说明）
 ├── deploy/
-│   ├── install.sh             # 103 一键部署（venv + 依赖 + systemd）
-│   ├── lite3-monitor.service  # systemd 单元，含 CAP_NET_RAW 能力配置
-│   ├── pack.sh                # 笔记本侧打包（自动剔除 node_modules）
-│   └── README.md              # 部署、验证、排错与回滚
+│   ├── install.sh                 # 103 一键部署（venv + 依赖 + systemd）
+│   ├── lite3-monitor.service      # systemd 单元，含 CAP_NET_RAW 能力配置
+│   ├── lite3-monitor-rosdirect.service  # 内嵌订阅版单元（ExecStart 会 source ROS）
+│   ├── lite3-ros-bridge.service   # ros_bridge_node 常驻服务
+│   ├── deploy_103.sh              # 笔记本侧增量同步（rsync + 重启，支持 TAG）
+│   ├── pack.sh                    # 笔记本侧全量打包（自动剔除 node_modules）
+│   └── README.md                  # 部署、验证、排错与回滚
 ├── frontend/
 │   ├── package.json
-│   ├── vite.config.js     # 内置 /api、/ws 代理
+│   ├── vite.config.js       # 内置 /api、/ws 代理
 │   ├── index.html
 │   └── src/
 │       ├── main.js
-│       ├── App.vue        # 主面板布局
-│       ├── api/index.js   # REST 封装 + WebSocket 客户端（自动重连）
+│       ├── App.vue          # 主面板布局
+│       ├── api/index.js     # REST 封装 + WebSocket 客户端（自动重连）
 │       ├── composables/useRobotState.js
 │       ├── components/
-│       │   ├── RobotStatus.vue
-│       │   ├── IMUChart.vue
-│       │   ├── JointPanel.vue
-│       │   ├── ControlPanel.vue
-└── RawPacket.vue
+│       │   ├── RobotStatus.vue    # 状态 / 步态 / 电池 / 连接
+│       │   ├── IMUChart.vue       # Roll / Pitch / Yaw 实时曲线（ECharts）
+│       │   ├── JointPanel.vue     # 12 个关节角度与角速度
+│       │   ├── RawPacket.vue      # 接收侧原始 UDP 报文十六进制预览
+│       │   ├── PacketMonitor.vue  # 发包监控通用组件（表格 + 结构化解析 + 展开详情）
+│       │   ├── SentPacket.vue     # Sent UDP Packets：PacketMonitor 的预置配置
+│       │   ├── ControlPanel.vue   # 控制通道：预置指令 / 速度 / 自定义报文 / 摇杆
+│       │   ├── HoverTip.vue       # 悬停提示
+│       │   ├── RosInfoTip.vue     # ROS 数据源说明提示
+│       │   └── ToastHost.vue      # 全局轻提示
 │       └── style.css
 ├── tools/
 │   ├── mock_sender.py               # 本地联调用的 Lite3 数据模拟器
 │   ├── smoke_test.py                # 端到端冒烟测试：UDP → 解析 → WS → REST → 离线判定
 │   └── inspect_control_packets.py   # 控制通道侦查：pcap 解析 + 逐字节差分 + 受控重放
-├── start-backend.bat                # 后端一键启动（自动建 .venv + 装依赖）
-├── start-backend.ps1                # 同上，PowerShell 版
-├── start-frontend.bat               # 前端一键启动（自动 npm install）
 ├── .gitignore                       # 忽略 .venv / node_modules / dist
 ├── requirements.txt
 └── README.md
 ```
 
-> `.venv/` 由启动脚本首次运行时自动创建，不需要提交到仓库。
+> `.venv/` 由 `deploy/install.sh` 在 103 上首次安装时创建，不需要提交到仓库。
+> 前端依赖走 `npm install`（笔记本侧），只有构建产物 `frontend/dist` 会被部署到 103。
 
 ---
 
@@ -117,79 +153,75 @@ lite3_robot_monitor/
 
 ## 四、快速开始
 
-### 1. 启动后端（Windows 推荐用脚本）
+> **运行环境：仅 103 感知导航主机**（Jetson Xavier NX，Ubuntu 20.04 / Python 3.8 / ROS 2 Foxy，
+> 用户 `ysc`，IP `192.168.1.103`）。本项目不在 Windows / macOS 上运行，
+> 也不再维护开发机启动脚本。
 
-在项目根目录 **双击 `start-backend.bat`** 即可，脚本会自动完成：
-创建 `.venv` → 安装 `backend/requirements.txt` → 启动 `uvicorn`。
-
-| 文件 | 适用场景 |
-| --- | --- |
-| `start-backend.bat` | 推荐，双击即可，无执行策略限制 |
-| `start-backend.ps1` | PowerShell 用户；若提示禁止运行脚本，用 `powershell -ExecutionPolicy Bypass -File start-backend.ps1` |
-
-换端口：`set PORT=9000` 后再运行（PowerShell 用 `$env:PORT=9000`）。
-
-<details>
-<summary>手动启动方式（Linux / macOS / 想自己掌控时）</summary>
+### 4.1 一键部署
 
 ```bash
-cd lite3_robot_monitor
-python -m venv .venv
-.venv/Scripts/python.exe -m pip install -r backend/requirements.txt   # Windows
-# source .venv/bin/activate && pip install -r backend/requirements.txt  # Linux / macOS
+# ── 笔记本侧：构建前端后打包（Jetson 上 npm build 很慢，建议本地构建后传产物）──
+cd frontend && npm run build && cd ..
+bash deploy/pack.sh
+scp lite3-monitor-deploy.tar.gz ysc@192.168.1.103:/home/test/
 
-cd backend
-../.venv/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000
+# ── 103 侧：解压并安装（自动建 venv、装依赖、抓包自检、注册 systemd 并启动）──
+ssh ysc@192.168.1.103
+cd /home/test && tar xzf lite3-monitor-deploy.tar.gz
+sudo bash lite3_robot_monitor/deploy/install.sh /home/test/monitor
 ```
 
-</details>
+内网 pip 源：
 
-浏览器打开 <http://localhost:8000/docs> 可查看自动生成的接口文档。
-
-> 若 UDP 端口被占用，服务仍会启动，可通过 `/api/status` 查看原因。
-
-#### 常见报错：`uvicorn 不是内部或外部命令`
-
-```
-uvicorn : The term 'uvicorn' is not recognized as the name of a cmdlet...
+```bash
+PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+  sudo -E bash lite3_robot_monitor/deploy/install.sh /home/test/monitor
 ```
 
-**原因**：没有激活虚拟环境，或依赖装在了别的 Python 里。全局 `uvicorn` 不在 PATH 中。
+安装脚本只做「安装与注册」，**不改动** `transfer_ros2`、`jy_exe` 及任何现有配置。
 
-**三种解法**（任选其一）：
+### 4.2 验证
 
-1. 用上面的 `start-backend.bat`（最省事，脚本内部绝对路径调用 `.venv` 里的 Python）；
-2. 先激活再运行：
-   ```powershell
-   .\.venv\Scripts\Activate.ps1
-   cd backend
-   uvicorn main:app --host 0.0.0.0 --port 8000
-   ```
-3. 不激活也可以，直接用 venv 的解释器：
-   ```powershell
-   .\.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000
-   ```
-
-若需确认依赖到底装在哪：
-
-```powershell
-.\.venv\Scripts\python.exe -c "import fastapi, uvicorn; print('ok')"
+```bash
+systemctl is-active lite3-monitor                 # 期望 active
+curl -s http://127.0.0.1:8000/api/status          # 接口自检
 ```
 
-### 2. 启动前端
+| 字段 | 期望值 | 含义 |
+| --- | --- | --- |
+| `udp_mode` | `sniff` | 旁路抓包生效，未占用 43897 |
+| `connected` | `true` | 已收到机器人状态 |
+| `packets_received` | 持续增长 | 数据链路正常 |
 
-双击 `start-frontend.bat`（首次自动 `npm install`），或手动执行：
+笔记本浏览器打开 <http://192.168.1.103:8000> 即可看到监控面板，
+接口文档在 <http://192.168.1.103:8000/docs>。
 
-访问 <http://localhost:5173> 即可看到监控面板。
+### 4.3 常用运维命令
 
-生产模式下也可先 `npm run build`，后端会自动托管 `frontend/dist`，直接用 `http://localhost:8000` 单端口访问。
+| 用途 | 命令 |
+| --- | --- |
+| 服务状态 | `systemctl status lite3-monitor` |
+| 实时日志 | `journalctl -u lite3-monitor -f` |
+| 重启服务 | `sudo systemctl restart lite3-monitor` |
+| 清崩溃计数 | `sudo systemctl reset-failed lite3-monitor` |
+| 接口自检 | `curl -s http://127.0.0.1:8000/api/status` |
+| 数据源模式 | `curl -s http://127.0.0.1:8000/api/source` |
+
+若服务起不来，优先看日志：
+
+```bash
+journalctl -u lite3-monitor -n 50 --no-pager
+```
+
+> 部署细节（为什么不能 bind 43897、监听模式、多实例、增量更新、排错表）
+> 见第五节与 [`deploy/README.md`](deploy/README.md)。
 
 ---
 
 ## 五、部署到 103 感知导航主机
 
 > 正式运行环境：**103（Jetson Xavier NX，Ubuntu 20.04 / Python 3.8，用户 `ysc`，IP 192.168.1.103）**
-> 安装目录：`/home/ysc/test/monitor`　详细运维与排错见 [`deploy/README.md`](deploy/README.md)。
+> 安装目录：`/home/test/monitor`　详细运维与排错见 [`deploy/README.md`](deploy/README.md)。
 
 ### 5.1 为什么不能直接在 103 上 bind 43897
 
@@ -210,10 +242,16 @@ Monitor 抢走 43897 → transfer_ros2 收不到状态
 | 模式 | 环境要求 | 占用 43897 | 适用 |
 | --- | --- | --- | --- |
 | `sniff` | Linux + `CAP_NET_RAW` | 否 | **103 部署（推荐）** |
-| `bind` | 任意 | 是 | Windows 开发机、无 root 权限时 |
+| `bind` | 任意 | 是 | 无 `CAP_NET_RAW` 时的兜底（**103 上不要主动用**，见 5.1） |
 
 `LITE3_UDP_MODE=auto`（默认）优先 sniff，失败自动退回 bind。
 当前生效模式可通过 `GET /api/status` 的 `udp_mode` 字段确认。
+
+> 以上指**监听模式**（怎么收 43897 原始报文）。另有**数据源模式**
+> `LITE3_DATA_SOURCE`，决定状态来自 sniff 还是 ROS 话题订阅；
+> 其中话题订阅又有 `bridge`（外部 ros_bridge_node 转发）与 `ros_direct`
+> （后端内嵌 rclpy 订阅，可省掉桥接进程，但仅限 103 运行）两种实现，
+> 详见 [`docs/ros_bridge.md`](docs/ros_bridge.md)。
 
 ### 5.3 部署步骤
 
@@ -228,13 +266,13 @@ scp lite3-monitor-deploy.tar.gz ysc@192.168.1.103:/tmp/
 # 3) 103：解压并安装（自动建 venv、装依赖、抓包自检、注册 systemd 并启动）
 ssh ysc@192.168.1.103
 cd /tmp && tar xzf lite3-monitor-deploy.tar.gz
-sudo bash lite3_robot_monitor/deploy/install.sh /home/ysc/test/monitor
+sudo bash lite3_robot_monitor/deploy/install.sh /home/test/monitor
 ```
 
 内网 pip 源：
 
 ```bash
-PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple sudo -E bash deploy/install.sh /home/ysc/test/monitor
+PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple sudo -E bash deploy/install.sh /home/test/monitor
 ```
 
 安装脚本只做「安装与注册」，**不改动** `transfer_ros2`、`jy_exe` 及任何现有配置。
@@ -263,6 +301,36 @@ curl http://127.0.0.1:8000/api/status
 | 抓到无关流量太多 | 设置 `LITE3_UDP_IFACE` 为业务网网卡名（连 `192.168.1.120` 的那张） |
 
 完整排错表与回滚步骤见 [`deploy/README.md`](deploy/README.md)。
+
+### 5.6 改完代码怎么更新（不必重跑 install.sh）
+
+日常改后端**不需要**重跑 `install.sh`——那会重建 venv、重装依赖，且会
+`rm -rf $TARGET/frontend`（源目录没带新 `dist` 时反而会把页面弄坏）。
+
+在 103 本机（源目录与运行目录都在本地）：
+
+```bash
+# 1) 同步后端（排除缓存）
+sudo rsync -av --exclude '__pycache__' --exclude '*.pyc' \
+  /home/test/lite3_robot_monitor/backend/ /home/test/monitor/backend/
+
+# 2) 清旧字节码，避免用到过期 .pyc
+sudo find /home/test/monitor/backend -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null
+
+# 3) 重启（config 是 frozen dataclass，import 时固化，不重启不生效）
+sudo systemctl restart lite3-monitor
+```
+
+从笔记本同步则用 `deploy/deploy_103.sh`（rsync + 重启，按 TAG 只动对应实例）。
+
+**只有以下情况才需要重跑 `install.sh`**：改了 `requirements.txt`、改了 `deploy/*.service`、
+要部署新构建的 `frontend/dist`、首次安装或更换安装目录。
+
+前端改动的正确更新方式是本地 `npm run build` 后同步 `dist`：
+
+```bash
+rsync -av /path/to/lite3_robot_monitor/frontend/dist/ ysc@192.168.1.103:/home/test/monitor/frontend/dist/
+```
 
 ---
 
@@ -319,7 +387,7 @@ curl http://127.0.0.1:8000/api/status
 | --- | --- | --- |
 | `LITE3_UDP_HOST` | `0.0.0.0` | UDP 监听地址 |
 | `LITE3_UDP_PORT` | `43897` | 目标 UDP 端口（需与 Lite3 发送目标端口一致） |
-| `LITE3_UDP_MODE` | `auto` | 接收模式：`auto` / `sniff`（旁路抓包）/ `bind`（绑定端口） |
+| `LITE3_UDP_MODE` | `auto` | **监听模式**：`auto` / `sniff`（旁路抓包）/ `bind`（绑定端口） |
 | `LITE3_UDP_IFACE` | 空 | 旁路抓包监听的网卡名，留空为全部网卡；建议填业务网网卡 |
 | `LITE3_UDP_BUFFER` | `2048` | 单次接收缓冲区大小 |
 | `LITE3_UDP_QUEUE` | `1024` | 接收队列容量，满时丢弃最旧数据 |
@@ -330,6 +398,26 @@ curl http://127.0.0.1:8000/api/status
 | `LITE3_RAW_HISTORY` | `30` | 原始报文环形缓存条数 |
 | `LITE3_LOG_LEVEL` | `INFO` | 日志级别 |
 | `LITE3_SERVE_FRONTEND` | `true` | 是否挂载 `frontend/dist` |
+
+**数据源相关**（决定状态来自哪种途径，详见 `docs/ros_bridge.md`）：
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `LITE3_DATA_SOURCE` | `auto` | `auto` / `ros` / `ros_direct` / `sniff` / `bind`；`auto` = ROS 系为主 + sniff 兜底，**双向自愈** |
+| `LITE3_ROS_IMPL` | `bridge` | auto 用哪种 ROS 实现：`bridge` 外部桥接进程 / `direct` 后端内嵌 rclpy |
+| `LITE3_ROS_BRIDGE_HOST` | `127.0.0.1` | `ros_bridge_node` 转发到的本地地址 |
+| `LITE3_ROS_BRIDGE_PORT` | `43900` | 本地桥接端口（多实例为 `43900 + TAG`） |
+| `LITE3_ROS_NODE_NAME` | `lite3_monitor_ros` | 内嵌订阅的 ROS 节点名，**多实例必须不同** |
+| `LITE3_ROS_TOPIC_IMU` | `/imu/data` | 内嵌订阅 topic（须与 `transfer_ros2` 实际发布的一致） |
+| `LITE3_ROS_TOPIC_ODOM` | `/leg_odom2` | 同上 |
+| `LITE3_ROS_TOPIC_JOINTS` | `/joint_states` | 同上 |
+| `LITE3_ROS_STALE_TIMEOUT` | `10.0` | ROS 曾正常后断流多少秒判定失效并降级 |
+| `LITE3_ROS_RETRY_INTERVAL` | `15.0` | 处于 sniff 兜底时，每隔多少秒探测 ROS 是否恢复 |
+
+**控制通道相关**：
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
 | `LITE3_CTRL_IP` | `192.168.1.120` | 控制指令目标 IP（运动主机；WiFi 网段 2 时为 `192.168.2.1`） |
 | `LITE3_CTRL_PORT` | `43893` | 控制指令目标端口 |
 | `LITE3_CTRL_HEARTBEAT` | `0.25` | 心跳周期（秒），文档要求频率 ≥ 2Hz |
@@ -338,32 +426,45 @@ curl http://127.0.0.1:8000/api/status
 | `LITE3_CTRL_MAX_LINEAR_Y` | `0.5` | 左右线速度硬上限（m/s），文档仅允许 ±0.5 |
 | `LITE3_CTRL_MAX_ANGULAR` | `1.5` | 角速度硬上限（rad/s） |
 | `LITE3_CTRL_ENABLED` | `false` | 启动即启用控制通道（**建议保持 false**） |
+| `LITE3_CTRL_INVERT_VEL_X` | `false` | 前后速度取反（实机方向与文档相反时开启） |
+| `LITE3_CTRL_INVERT_VEL_Y` | `false` | 左右速度取反 |
+| `LITE3_CTRL_INVERT_VEL_YAW` | `false` | 旋转方向取反 |
+
+> 布尔型变量接受 `1 / true / yes / on`（真）与 `0 / false / no / off`（假），大小写不敏感。
+> 全部配置在 **import 时读取且为 frozen dataclass**，修改后**必须重启服务**才生效。
 
 前端可通过 `VITE_BACKEND_URL` 指定后端地址（跨域直连模式）。
 
 ---
 
-## 八、本机无机器人时的联调
+## 八、无机器人上电时的联调
 
-使用内置模拟器向本机发送符合协议的数据：
+机器人未上电时，可用内置模拟器向 103 本机发送符合协议的数据，验证解析链路：
 
 ```bash
+cd /home/test/monitor
+
 # 默认向 127.0.0.1:43897 以 10Hz 发送
-python tools/mock_sender.py
+/home/test/monitor/.venv/bin/python tools/mock_sender.py
 
 # 只发一轮用于协议校验
-python tools/mock_sender.py --once
+/home/test/monitor/.venv/bin/python tools/mock_sender.py --once
 ```
 
-随后刷新页面，应能看到：状态卡片显示「力控状态 / 平地高速 / 78.0%」，IMU 曲线随时间摆动，12 个关节数值滚动更新。停止模拟器 3 秒后（默认超时），页面自动切换为 **Disconnected**。
+> 注意：`sniff` 走 AF_PACKET 抓的是**网卡流量**，`127.0.0.1` 的回环包抓不到。
+> 模拟器要发往 103 的业务网 IP（如 `192.168.1.103`），或临时把监听模式切到 `bind`：
+> `curl -X POST 'http://127.0.0.1:8000/api/source/set?mode=bind'`（测完切回 `auto`）。
+
+随后刷新页面，应能看到：状态卡片显示「力控状态 / 平地高速 / 78.0%」，IMU 曲线随时间摆动，
+12 个关节数值滚动更新。停止模拟器 3 秒后（默认超时），页面自动切换为 **Disconnected**。
 
 也可直接在命令行做一次完整链路自检（UDP → 解析 → WebSocket → REST → 离线判定）：
 
 ```bash
-python tools/smoke_test.py
+/home/test/monitor/.venv/bin/python tools/smoke_test.py
 ```
 
-测试会临时占用本机 8000 端口，通过后打印「全部冒烟测试通过」。
+测试会临时占用本机 8000 端口，**请先停掉 `lite3-monitor` 服务**，通过后打印「全部冒烟测试通过」。
 
 ---
 
@@ -378,13 +479,15 @@ python tools/smoke_test.py
 
 ---
 
-## 十、后续扩展预留
+## 十、扩展状态与预留
 
-| 方向 | 建议接入位置 |
-| --- | --- |
-| 视频（RealSense / RTSP） | 新增 `backend/video_stream.py`，接口 `GET /api/video` 或 `WS /ws/video` |
-| AI 检测（YOLO 火焰检测） | 新增 `backend/detector.py`，接口 `GET /api/detection`，前端增加 `DetectionPanel.vue` |
-| ROS2 桥接 | 新增 `backend/ros_bridge.py`，把 `/ws/state` 的 dict 转成 ROS2 Topic，或反向订阅 |
+| 方向 | 状态 | 说明 |
+| --- | --- | --- |
+| ROS 话题订阅 | ✅ 已实现 | `ros_bridge_node.py`（外部进程）与 `ros_direct_source.py`（内嵌 rclpy）两种，转换逻辑共用 `ros_topic_adapter.py`，详见 `docs/ros_bridge.md` |
+| 发包结构化解析 | ✅ 已实现 | `control_protocol.describe_packet` 产出 `fields[]`；前端 `PacketMonitor.vue` 做十六进制分段着色与逐字段展开 |
+| 多实例并行部署 | ✅ 已实现 | `install.sh <目录> <TAG>`：服务名 / HTTP 端口 / 桥接端口按 TAG 派生 |
+| 视频（RealSense / RTSP） | 预留 | 新增 `backend/video_stream.py`，接口 `GET /api/video` 或 `WS /ws/video` |
+| AI 检测（YOLO 火焰检测） | 预留 | 新增 `backend/detector.py`，接口 `GET /api/detection`，前端增加 `DetectionPanel.vue` |
 
 新增能力只需：在 `parser.py` 增加消息码分支 → 在 `models.py` 增加模型 → 在前端增加组件，
 不需要改动 UDP 接收与 WebSocket 推送骨架。
@@ -511,6 +614,20 @@ struct Command {
 | POST | `/api/control/estop` / `estop/clear` | 急停（含软急停指令）/ 解除 |
 | POST | `/api/control/heartbeat/start` / `stop` / `renew` | 心跳控制 |
 | GET | `/api/control/audit` | 指令审计记录 |
+
+每条审计记录（`control_protocol.describe_packet` 的输出）除原始 `hex` 外还带结构化字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `code_hex` / `name` | 指令码十六进制 + 中文名（未知码为空串） |
+| `paramters_size` | 包头第 2 个 uint32：简单指令即**指令值**，复杂指令为**数据长度** |
+| `param_i32` | 同上字段按 int32 的解读（轴指令会下发 `-1`、`±6553` 这类负值） |
+| `type` | `0` 简单指令 / `1` 复杂指令 |
+| `data_hex` / `data` | 数据区十六进制 / 按 double 的解读 |
+| `fields` | 逐字段结构化列表（偏移 / 长度 / hex / 值 / 说明），前端据此给预览分段着色 |
+| `data_views` | 数据区多视角解码（double / float / int32 / uint32 / int16 …） |
+
+界面一律以**十六进制**呈现，与报文原文逐字节对应；十进制换算只在需要时手动切换。
 
 ### 12.7 典型使用顺序
 

@@ -65,18 +65,20 @@ const rows = computed(() =>
   gap: 8px;
 }
 
+/* 中性描边为默认（与全局按钮规范一致） */
 .btn {
   padding: 3px 10px;
   font-size: 12px;
-  color: #fff;
-  background: var(--accent);
-  border: none;
+  color: #334155;
+  background: #ffffff;
+  border: 1px solid #dbe2ea;
   border-radius: 6px;
   cursor: pointer;
 }
 
 .btn:hover {
-  background: #1d4ed8;
+  background: #f1f5f9;
+  border-color: #cbd5e1;
 }
 
 .btn.ghost {

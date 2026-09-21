@@ -47,6 +47,30 @@ def _get_float(name: str, default: float) -> float:
         return default
 
 
+_TRUE_VALUES = {"1", "true", "yes", "on", "y", "t"}
+_FALSE_VALUES = {"0", "false", "no", "off", "n", "f", ""}
+
+
+def _get_bool(name: str, default: bool = False) -> bool:
+    """读取布尔型环境变量。
+
+    真：1 / true / yes / on / y / t；假：0 / false / no / off / n / f（均大小写不敏感）。
+
+    之所以显式列出而不是只判 ``== "true"``：部署时很容易顺手写成 ``=1``，
+    只判 "true" 会让这类配置**静默失效**（既没报错也没生效），排查成本很高。
+    无法识别时回退默认值，不抛异常——配置错误不该让服务起不来。
+    """
+    value = os.getenv(name)
+    if value is None:
+        return default
+    v = value.strip().lower()
+    if v in _TRUE_VALUES:
+        return True
+    if v in _FALSE_VALUES:
+        return False
+    return default
+
+
 @dataclass(frozen=True)
 class UDPConfig:
     """UDP 接收相关配置。
@@ -67,7 +91,7 @@ class UDPConfig:
     # 接收模式：
     #   auto  —— Linux 上优先用旁路抓包（不占用端口），失败则退回 bind（默认）
     #   sniff —— 强制旁路抓包；103 部署推荐，避免与 transfer_ros2 抢 43897
-    #   bind  —— 强制绑定端口；Windows 开发机或没有 root 权限时使用
+    #   bind  —— 强制绑定端口；没有 CAP_NET_RAW 权限时的兜底（103 上勿用，见 README 5.1）
     mode: str = _get_str("LITE3_UDP_MODE", "auto").lower()
     # 旁路抓包监听的网卡名；为空表示所有网卡。
     # 指定网卡可显著减少无关流量（例如 103 上拉取的 RTSP 视频流）。
@@ -89,7 +113,7 @@ class ServiceConfig:
     # 原始报文十六进制预览的最大字节数
     raw_preview_bytes: int = _get_int("LITE3_RAW_PREVIEW", 64)
     # 是否挂载已构建的前端静态资源（frontend/dist）
-    serve_frontend: bool = _get_str("LITE3_SERVE_FRONTEND", "true").lower() == "true"
+    serve_frontend: bool = _get_bool("LITE3_SERVE_FRONTEND", True)
     # 前端静态资源目录（相对 backend 目录）
     frontend_dist: str = _get_str("LITE3_FRONTEND_DIST", "../frontend/dist")
 
@@ -115,9 +139,18 @@ class ControlConfig:
     max_linear_y: float = _get_float("LITE3_CTRL_MAX_LINEAR_Y", cp.MAX_LINEAR_Y)
     max_angular: float = _get_float("LITE3_CTRL_MAX_ANGULAR", cp.MAX_ANGULAR)
     # 是否在服务启动时自动启用控制通道（默认关闭，强烈建议保持 False）
-    enabled_by_default: bool = (
-        _get_str("LITE3_CTRL_ENABLED", "false").lower() == "true"
-    )
+    enabled_by_default: bool = _get_bool("LITE3_CTRL_ENABLED", False)
+
+    # 速度方向取反开关。
+    # 文档 1.2.12 定义"x 正值前进、y 正值向右、yaw 正值向右转"，代码按此实现；
+    # 若实机表现相反（固件与文档不一致，或对"右"的参考系理解不同），
+    # 用这三个开关逐轴纠正即可，无需改代码。
+    #
+    # y 轴默认取反：103 实机实测「左右」方向与文档定义相反（下发正值向右，
+    # 实机却向左），故此处默认 True。x / yaw 仍遵循文档。
+    invert_vel_x: bool = _get_bool("LITE3_CTRL_INVERT_VEL_X", False)
+    invert_vel_y: bool = _get_bool("LITE3_CTRL_INVERT_VEL_Y", True)
+    invert_vel_yaw: bool = _get_bool("LITE3_CTRL_INVERT_VEL_YAW", False)
 
 
 @dataclass(frozen=True)
@@ -130,7 +163,7 @@ class DataSourceConfig:
                （/leg_odom2 /imu/data /joint_states）。推荐：零端口冲突、
                拿到的已是结构化消息、与 transfer_ros2 完全解耦。
       sniff —— AF_PACKET 旁路抓包直接收 43897（不占端口，与 transfer_ros2 共存）。
-      bind  —— 直接绑定 43897（开发机 / 无权限时的兜底）。
+      bind  —— 直接绑定 43897（无 CAP_NET_RAW 时的兜底，103 上不要主动用）。
       auto  —— 优先 ros；ros 无数据时自动回退 sniff，**ros 恢复后再自动切回 ros**。
                即「ros 为主 + sniff 兜底」是双向自愈的，而非一次性降级
                （见 main.py 的 MonitorService 数据源看门狗）。
@@ -147,6 +180,19 @@ class DataSourceConfig:
     # ros 曾经正常、之后才断流时（例如 transfer_ros2 重启），静默多久判定失效并回退。
     # 比 link_timeout 更长：10Hz 的 topic 偶尔抖动不该触发降级。
     ros_stale_timeout: float = _get_float("LITE3_ROS_STALE_TIMEOUT", 10.0)
+
+    # ---- 内嵌订阅（ros_direct）相关 ----
+    # ros 话题订阅的实现方式：
+    #   bridge —— 外部 ros_bridge_node 进程转发（默认，后端不依赖 ROS 环境）
+    #   direct —— 后端进程自己 import rclpy 订阅（少一个进程，但需 source ROS）
+    # 仅影响 ros / auto 模式；显式指定 ros_direct 时以它为准。
+    ros_impl: str = _get_str("LITE3_ROS_IMPL", "bridge").lower()
+    # 内嵌订阅的节点名：并行部署多套实例时必须各不相同（或用 ROS_DOMAIN_ID 隔离）
+    ros_node_name: str = _get_str("LITE3_ROS_NODE_NAME", "lite3_monitor_ros")
+    # 内嵌订阅的 topic 名（与 transfer_ros2 实际发布的一致）
+    ros_topic_imu: str = _get_str("LITE3_ROS_TOPIC_IMU", "/imu/data")
+    ros_topic_odom: str = _get_str("LITE3_ROS_TOPIC_ODOM", "/leg_odom2")
+    ros_topic_joints: str = _get_str("LITE3_ROS_TOPIC_JOINTS", "/joint_states")
     # 回退 sniff 期间，每隔多久探测一次 ros 是否已恢复。
     # 探测不丢数据（见 main.py _probe_ros_available），故可以设置得比较积极。
     ros_retry_interval: float = _get_float("LITE3_ROS_RETRY_INTERVAL", 15.0)

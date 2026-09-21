@@ -206,7 +206,7 @@ class MonitorService:
 
     async def set_mode(self, mode: str) -> Dict[str, Any]:
         """运行时切换数据源模式（供 /api/source/set 调用）。"""
-        allowed = {"ros", "sniff", "bind", "auto"}
+        allowed = {"ros", "ros_direct", "sniff", "bind", "auto"}
         if mode not in allowed:
             return {"ok": False, "detail": f"不支持的模式: {mode}，可选 {sorted(allowed)}"}
         self._auto_fell_back = False  # 手动切换重置回退标记
@@ -300,7 +300,8 @@ class MonitorService:
         """
         if data_source_config.mode != "auto":
             return
-        if self.data_source_mode != "ros":
+        # ros（桥接）与 ros_direct（内嵌订阅）都要纳入降级判定
+        if self.data_source_mode not in ("ros", "ros_direct"):
             return
         if not UDPSniffer.is_supported():
             return
@@ -375,15 +376,39 @@ class MonitorService:
             return
         self._last_ros_probe_at = now
 
-        # 阻塞式收包放进线程池，避免卡住 asyncio 事件循环
-        recovered = await loop.run_in_executor(None, self._probe_ros_available)
+        # auto 下到底该切回哪种 ros 实现，由 LITE3_ROS_IMPL 决定
+        target = "ros_direct" if data_source_config.ros_impl == "direct" else "ros"
+        probe = (self._probe_ros_direct_available if target == "ros_direct"
+                 else self._probe_ros_available)
+
+        # 阻塞式探测放进线程池，避免卡住 asyncio 事件循环
+        recovered = await loop.run_in_executor(None, probe)
         if not recovered:
             return
 
-        logger.info("auto 模式：检测到 ros 桥接已恢复，优先切回 ros 数据源")
-        self._switch_source("ros")
+        logger.info("auto 模式：检测到 ros 已恢复，优先切回 %s 数据源", target)
+        self._switch_source(target)
         # 置回 False：允许 ros 再次失效时继续降级，形成双向自愈而非一次性降级
         self._auto_fell_back = False
+
+    def _probe_ros_direct_available(self) -> bool:
+        """探测内嵌订阅是否已恢复：读常驻节点的「最后消息时间」。
+
+        节点在降级到 sniff 期间**并未销毁**（见 ros_direct_source 的 stop），
+        回调仍在实时更新该时间戳，所以这里读到的就是 ROS 图的真实活跃度——
+        既不用停掉正在工作的 sniff，也不用重建节点再等首帧。
+        """
+        try:
+            from ros_direct_source import peek_last_message_age  # 延迟导入
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ros_direct 探测不可用: %s", exc)
+            return False
+
+        age = peek_last_message_age()
+        if age is None:
+            return False
+        # 只要在陈旧阈值内还有消息，就认为已恢复
+        return age <= max(1.0, data_source_config.ros_stale_timeout)
 
     async def _source_watchdog(self, loop) -> None:
         """数据源双向看门狗入口，每轮消费循环调用一次。"""
@@ -512,14 +537,99 @@ async def get_raw(limit: int = 20) -> RawPacketResponse:
 # 收不到数据时自动回退 sniff；也可由前端手动切到 ros / sniff / bind。
 # 见 config.DataSourceConfig 与 data_source.py。
 # ----------------------------------------------------------------------
+def _ros_diag() -> Dict[str, Any]:
+    """ROS 数据源自检，产出可直接渲染到页面的排查结论。
+
+    目的是把"ROS 模式失败了但不知道为什么"变成一份逐项勾选的清单：
+    模式配置 / 当前生效 / 桥接端口是否在收数据 / sniff 兜底是否可用。
+    """
+    now = time.monotonic()
+    active = service.data_source_mode
+    configured = data_source_config.mode
+    frames = service._frames_received
+    since = round(now - service._last_frame_at, 1) if service._last_frame_at else None
+
+    checks = []
+
+    checks.append({
+        "item": "模式配置",
+        "ok": configured in ("ros", "auto"),
+        "detail": f"LITE3_DATA_SOURCE={configured}"
+                  + ("" if configured in ("ros", "auto") else "（该配置不会走 ROS）"),
+    })
+
+    checks.append({
+        "item": "当前生效数据源",
+        "ok": active == "ros",
+        "detail": f"当前 {active}"
+                  + ("" if active == "ros"
+                     else ("（auto 已因 ROS 无数据回退）" if service._auto_fell_back else "")),
+    })
+
+    if active == "ros":
+        if frames == 0:
+            detail = f"已等待 {round(now - service._source_started_at, 1)}s 仍未收到任何帧"
+        else:
+            detail = f"最近一帧 {since}s 前（阈值 {data_source_config.ros_stale_timeout}s）"
+        ok = frames > 0 and (since is None or since < data_source_config.ros_stale_timeout)
+        checks.append({
+            "item": f"桥接端口 {data_source_config.ros_bridge_port} 收包",
+            "ok": bool(ok),
+            "detail": detail,
+        })
+    else:
+        checks.append({
+            "item": f"桥接端口 {data_source_config.ros_bridge_port} 收包",
+            "ok": False,
+            "detail": "当前不在 ros 模式，未监听桥接端口",
+        })
+
+    checks.append({
+        "item": "sniff 兜底能力",
+        "ok": UDPSniffer.is_supported(),
+        "detail": "支持 AF_PACKET 旁路抓包" if UDPSniffer.is_supported()
+                  else "不支持（缺 CAP_NET_RAW 或非 Linux），ROS 失败后无兜底",
+    })
+
+    # 结论与建议
+    if active == "ros" and frames > 0 and (since is None or since < data_source_config.ros_stale_timeout):
+        verdict, hint = "ok", "ROS 话题订阅正常收数。"
+    elif configured not in ("ros", "auto"):
+        verdict, hint = "warn", "配置为 %s，不会使用 ROS。请切到 auto 或 ros。" % configured
+    elif active == "bind":
+        verdict, hint = "fail", "已降级到 bind（直接绑定 43897），可能与 transfer_ros2 抢端口。"
+    elif service._auto_fell_back or active == "sniff":
+        verdict, hint = (
+            "fail",
+            "ROS 未取到数据，已回退 sniff。请确认：① lite3-ros-bridge 服务在运行；"
+            "② 它订阅的 topic 名与 transfer_ros2 实际发布的一致（默认 /imu/data、/leg_odom2、/joint_states）；"
+            "③ 桥接端口与本机 LITE3_ROS_BRIDGE_PORT 一致。",
+        )
+    else:
+        verdict, hint = "wait", "ROS 模式已启用，正在等待首帧数据（超过 link_timeout 会自动回退）。"
+
+    return {
+        "verdict": verdict,
+        "hint": hint,
+        "checks": checks,
+        "frames_received": frames,
+        "since_last_frame": since,
+        "ros_bridge_port": data_source_config.ros_bridge_port,
+        "ros_stale_timeout": data_source_config.ros_stale_timeout,
+        "ros_retry_interval": data_source_config.ros_retry_interval,
+        "link_timeout": service_config.link_timeout,
+    }
+
+
 @app.get("/api/source", tags=["source"])
 async def get_source() -> Dict[str, Any]:
-    """返回当前数据与配置的数据源模式。"""
+    """返回当前数据与配置的数据源模式，并附带 ROS 自检结论。"""
     return {
         "mode": service.data_source_mode,
         "configured": data_source_config.mode,
         "ros_bridge": f"{data_source_config.ros_bridge_host}:{data_source_config.ros_bridge_port}",
         "auto_fell_back": service._auto_fell_back,
+        "diag": _ros_diag(),
     }
 
 
