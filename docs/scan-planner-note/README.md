@@ -1,10 +1,11 @@
+** This session may be vulnerable to "store now, decrypt later" attacks.
 # SCAN-Planner 部署到 103 主机：评估结论与方案
 
 > 目标仓库：https://github.com/wuyi2121/SCAN-Planner （main 分支，ROS 1 版）
 > 目标主机：103（lite3-f20-1-103 / 192.168.1.103，用户 ysc）
 > 作业空间：`/home/test/scan_planner`
 > 文档状态：**已执行**（已 clone、已编译通过、仿真闭环跑通、Lite3 参数适配已完成并通过双次复跑）
-> 编写时间：2026-09-21　最后更新：2026-09-21 03:40
+> 编写时间：2026-09-21　最后更新：2026-09-23 02:41
 
 ## 〇、当前进度（一眼看完）
 
@@ -19,8 +20,10 @@
 | Lite3 模型替换（官方 URDF + 网格） | ✅ 完成 | 新增 `lite3_description` 包 |
 | Lite3 参数适配 + A/B 回归 | ✅ 完成 | 见 `05-避坑事项.md` 第 8 章，双次复跑通过 |
 | FAST-LIO 话题适配（`/LIO/*`） | ✅ 完成 | FAST-LIO 实际发 `/Odometry` + `/cloud_registered_body`，已用 `lio_relay.launch` 补齐（第 10 章），假数据源端到端验证通过 |
-| 真机本体接入 | ⏳ 未开始 | 见 `05-避坑事项.md` 第 9 章，6 步清单 |
-| **真机接入** | ⏳ 未开始 | 见 `05-避坑事项.md` 第 9 章待办清单 |
+| **雷达硬件定性** | ✅ 完成 | 实为 **Livox Mid360**（IP `192.168.1.201`，抓包定性），走 ROS1 的 `start_livox.sh`；`c16.yaml` / `/rslidar_points` / `lidar_type: 4` 全是历史遗留名（第 11 章） |
+| 临时环境脚本（建立 + 备份 + 复原） | ✅ 完成 | `scripts/env.sh` 自动快照、`scripts/env_restore.sh` 精确复原，往返已实测 |
+| 真机封装脚本（自带 master 探活） | ✅ 完成 | `scripts/start_lio_relay.sh`、`scripts/start_scan_real.sh` |
+| **真机本体接入** | ⏳ 未开始 | 见 `05-避坑事项.md` 第 9 章，6 步清单 |
 
 ---
 
@@ -50,11 +53,58 @@
 
 | 文件 | 内容 |
 |---|---|
+| **`06-真机启动流程.md`** | ⭐ **操作单**：开 6~7 个终端、先建环境再逐个启动、每步的自检命令、排障速查表、关停顺序。**真机联调照着这份走** |
 | `01-兼容性评估.md` | 项目依赖清单、103 实测环境、逐项对照表、风险登记与降级方案 |
 | `02-部署执行方案.md` | 准备工作、作业空间目录设计、离线传输、编译、三级验证、真机接入方案、参数适配清单 |
 | `03-命令清单与回滚.md` | 可直接复制执行的命令集（含代理配置 A0、打包/传输/编译/验证）、回滚与清理步骤 |
 | `04-阶段一执行报告.md` | 阶段一落地结果：编译产物、仿真冒烟数据、ros1_bridge 需求修正说明 |
 | **`05-避坑事项.md`** | ⭐ **踩坑手册**：网络/ ROS1 隔离/ 编译/ 桥接/ Shell 操作/ 仿真判读/ Lite3 参数 全链路坑点与对策，含 A/B 实测数据表。**开工前先看这一份** |
+
+### 脚本清单（`scripts/`）
+
+| 脚本 | 作用 |
+|---|---|
+| `env.sh` | **建立 ROS1 临时环境**（source 用）。改动前先快照 18 个环境变量到 `logs/env_backup_<ts>_<pid>.sh` |
+| `env_restore.sh` | **关闭临时环境并复原**（source 用）。默认复原最近一次快照，也可带参数指定某一份 |
+| `build.sh` / `check.sh` | 编译（固定 `-j2`）／依赖自检 |
+| `run_sim.sh` / `smoke.sh` / `goal.sh` | 仿真启动、冒烟、发目标点 |
+| `ab_test.sh` | 无人值守 A/B（**测量期间禁止手动 rostopic**，见避坑 6.1） |
+| `fake_lio.py` / `test_lio_relay.sh` / `test_realworld_e2e.sh` | 假数据源 + relay 与真机链路的离线验证 |
+| `start_lio_relay.sh` | 真机：先探 master 再启 `/LIO/*` 中继，连不上 20s 内报错退出 |
+| `start_scan_real.sh` | 真机：以 `is_real_world:=true navi_mode:=1 need_extrinsic:=false` 启动规划器 |
+
+---
+
+## 二·补、临时环境的建立与复原
+
+103 的 `~/.bashrc` 默认 source **foxy**，而 SCAN-Planner 是 ROS 1，所以每个终端开工前都要切环境。
+`env.sh` 在动手改任何变量**之前**先把原值存下来，收工时 `env_restore.sh` 精确复原：
+
+```bash
+cd /home/test/scan_planner
+
+source scripts/env.sh          # 建环境；同时生成 logs/env_backup_<时间戳>_<pid>.sh
+                               # 输出: [env] ROS_DISTRO=noetic  AMENT=[empty]
+                               #       [env] ROS_MASTER_URI=http://192.168.1.103:11311
+
+# ... 干活 ...
+
+source scripts/env_restore.sh  # 关环境；含"原本没设"的变量也会被 unset
+                               # 输出: [restore] ✅ 已复原: env_backup_xxxx.sh
+```
+
+要点：
+
+- 覆盖 18 个变量：`PATH`、`PYTHONPATH`、`LD_LIBRARY_PATH`、`PKG_CONFIG_PATH`、`CMAKE_PREFIX_PATH`、
+  `ROS_*`（MASTER_URI / HOSTNAME / IP / DISTRO / VERSION / PYTHON_VERSION / ROOT / ETC_DIR / PACKAGE_PATH）、
+  `AMENT_PREFIX_PATH`、`COLCON_PREFIX_PATH`、`ROS_DOMAIN_ID`、`RMW_IMPLEMENTATION`。
+- 原本**没设**的变量在快照里写 `unset`，不是空串，复原后不留空壳。
+- 同一 shell 内重复 `source env.sh` **不会**覆盖快照（靠 `SCAN_PLANNER_ENV_BACKUP` 标记），
+  否则第二次会把 noetic 的值误当成"原值"。
+- 历史快照：`ls -lt logs/env_backup_*.sh`；指定复原：
+  `source scripts/env_restore.sh logs/env_backup_0923_023000_1234.sh`
+
+> 忘了 source 就敲命令的典型症状：`roslaunch: command not found`（foxy 里没有 roslaunch）。
 
 ---
 
@@ -129,19 +179,28 @@ ROS 包数量    : 12 个
 当前只剩真机接入，**详细步骤见 `05-避坑事项.md` 第 9 章**，摘要：
 
 ```bash
-# ① 雷达（注意: c16.yaml 是镭神 C16, 配 start_lslidar.sh, 不是 start_livox.sh）
-cd /home/ysc/lite_cog/system/scripts/lidar && bash start_lslidar.sh
+cd /home/test/scan_planner
+
+# ⓪ 机器人本体 IMU（Fast-LIO 的 /imu/data 由它提供，不是雷达提供的）
+bash /home/ysc/lite_cog/system/scripts/transfer/start_transfer.sh
+# ① 雷达 = Livox Mid360（已抓包定性，见避坑第 11 章）
+#    注意：必须用 ROS1 那份；同一时刻只能起一个雷达驱动（两份都抢 :56301/:56401）
+cd /home/ysc/lite_cog/system/scripts/lidar && bash start_livox.sh
 # ② SLAM（输出 /Odometry 与 /cloud_registered_body, 不是 /LIO/*）
 bash /home/ysc/lite_cog/system/scripts/slam/start_slam.sh
-# ③ 补出 /LIO/* 三话题
-roslaunch scan_planner lio_relay.launch
+# ③ 补出 /LIO/* 三话题（脚本内部自带 source env.sh + master 探活）
+bash scripts/start_lio_relay.sh
 # ④ SCAN-Planner 真机模式（先不接机器人）
-roslaunch scan_planner run.launch is_real_world:=true navi_mode:=1 \
-  sensor_type:=lidar need_extrinsic:=false
+bash scripts/start_scan_real.sh
 # ⑤ 只桥一个 Twist
 ros2 run ros1_bridge parameter_bridge /scan_planner/cmd_vel@geometry_msgs/msg/Twist@geometry_msgs/Twist
 # ⑥ 首次上电：四腿离地 + 限速，再落地
 ```
+
+> ③ ④ 也可以手动跑：`source scripts/env.sh` 后再
+> `roslaunch scan_planner lio_relay.launch` /
+> `roslaunch scan_planner run.launch is_real_world:=true navi_mode:=1 sensor_type:=lidar need_extrinsic:=false`。
+> 但**裸敲 `roslaunch` 会报 command not found**——终端默认是 foxy，必须先建环境。
 
 ⚠️ 上述 6 步中的**真机部分尚未执行**；第 ①～④ 的数据链路已用假数据源端到端验证通过。
 
