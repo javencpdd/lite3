@@ -209,12 +209,45 @@ class DisplayConfig:
     joint_parts: Tuple[str, ...] = ("hip_x", "hip_y", "knee")
 
 
+@dataclass(frozen=True)
+class RosConfig:
+    """ROS 版本识别与方案切换相关配置。
+
+    手动指定入口（优先级高于自动检测）：
+      1. 启动参数 ``--ros-version ros1|ros2``（见 main.py）
+      2. 环境变量 ``LITE3_ROS_VERSION=ros1|ros2``（systemd 场景用这个）
+
+    取值说明：
+      auto  —— 不指定，交给 ros_env 自动检测（默认）
+      ros1  —— 强制按 ROS1 方案执行
+      ros2  —— 强制按 ROS2 方案执行
+
+    各版本"怎么干"声明在 ros_profiles.py，检测逻辑在 ros_env.py，
+    本配置只声明**用哪个**以及**出错怎么办**。
+    """
+
+    # 手动指定的 ROS 版本：auto / ros1 / ros2（1 与 2 亦可）
+    version: str = _get_str("LITE3_ROS_VERSION", "auto").lower()
+
+    # 严格模式：检测失败/版本不受支持时，true=直接抛异常让进程启动失败；
+    # false=回退到 fallback_mode 对应的安全默认数据源（默认 false）。
+    strict: bool = _get_bool("LITE3_ROS_STRICT", False)
+
+    # 回退时使用的数据源模式。默认 sniff：AF_PACKET 旁路抓 43897，
+    # 与 ROS1/ROS2 都无关，是唯一"两头都安全"的选择。
+    fallback_mode: str = _get_str("LITE3_ROS_FALLBACK_MODE", "sniff").lower()
+
+    # 自动检测时，单条外部命令（systemctl 等）的超时秒数
+    detect_timeout: float = _get_float("LITE3_ROS_DETECT_TIMEOUT", 3.0)
+
+
 # 全局单例配置对象
 udp_config = UDPConfig()
 service_config = ServiceConfig()
 control_config = ControlConfig()
 data_source_config = DataSourceConfig()
 display_config = DisplayConfig()
+ros_config = RosConfig()
 
 
 def get_joint_names() -> List[str]:

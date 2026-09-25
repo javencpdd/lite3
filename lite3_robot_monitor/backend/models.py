@@ -157,6 +157,11 @@ class ServiceStatus(BaseModel):
     packets_error: int = 0
     ws_clients: int = 0
     push_hz: int = 0
+    # ---- ROS 版本识别与方案切换（见 ros_env / ros_profiles / ros_switch）----
+    ros_version: str = Field("unknown", description="当前 ROS 版本：ros1 / ros2 / unknown")
+    ros_source: str = Field("auto", description="版本来源：manual-cli / manual-env / auto / fallback")
+    ros_degraded: bool = Field(False, description="是否因检测失败/版本不受支持而走了回退")
+    ros_error: str = Field("", description="回退原因；为空表示正常")
 
 
 class RawPacketItem(BaseModel):

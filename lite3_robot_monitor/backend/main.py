@@ -43,6 +43,38 @@ from config import (  # noqa: E402
     udp_config,
 )
 from control_service import ControlError, ControlService  # noqa: E402
+from ros_switch import RosPlan, RosSwitchError, resolve as resolve_ros_plan  # noqa: E402
+
+# ---- ROS 版本识别与方案切换 ----
+# 检测(ros_env) / 方案声明(ros_profiles) / 裁决回退(ros_switch) 三层解耦。
+# 这里只做惰性裁决：首次用到时才解析，避免与 uvicorn 的模块重载互相干扰。
+_ROS_PLAN_CACHE: Optional[RosPlan] = None
+
+
+def get_ros_plan() -> RosPlan:
+    """返回当前采用的 ROS 方案（裁决一次后缓存）。
+
+    检测失败 / 版本不受支持 / 手动值非法时，ros_switch 内部已经：
+    打 ERROR 日志 → 置 degraded → 回退到安全默认数据源（默认 sniff）。
+    仅在 LITE3_ROS_STRICT=true 时抛出 RosSwitchError。
+    """
+    global _ROS_PLAN_CACHE
+    if _ROS_PLAN_CACHE is None:
+        _ROS_PLAN_CACHE = resolve_ros_plan()
+        plan = _ROS_PLAN_CACHE
+        if plan.degraded:
+            logger.error(
+                "ROS 方案已降级: version=%s source=%s error=%s 生效数据源=%s",
+                plan.version.value, plan.source, plan.error,
+                plan.effective_data_source_mode,
+            )
+        else:
+            logger.info(
+                "ROS 方案就绪: version=%s source=%s 生效数据源=%s 节点发现=%s",
+                plan.version.value, plan.source, plan.effective_data_source_mode,
+                " ".join(plan.profile.node_list_cmd) if plan.profile else "-",
+            )
+    return _ROS_PLAN_CACHE
 from models import (  # noqa: E402
     ControlStatus,
     CustomCommandRequest,
@@ -154,10 +186,18 @@ class MonitorService:
     def _build_data_source(self) -> DataSource:
         """按配置构造数据源。
 
-        auto / ros -> 本地桥接（ros_bridge_node 转发来的 ROS topic）；
-        sniff / bind -> 直连 43897。
+        - 显式配置 ros / sniff / bind / ros_direct 时，**尊重配置**（手动优先）；
+        - 配置为 auto 时，由 **ROS 版本方案决定**（见 ros_profiles）：
+            ROS2 → ros（桥接 43900 或内嵌 rclpy 订阅）
+            ROS1 → sniff（AF_PACKET 旁路抓 43897，与 ROS 版本无关）
+          这样 ROS1 下不会再白等 ros 桥接超时，也不会误用 ROS2 的桥接节点。
         """
-        return build_data_source(data_source_config.mode)
+        mode = (data_source_config.mode or "auto").lower()
+        if mode == "auto":
+            mode = get_ros_plan().effective_data_source_mode
+            logger.info("数据源模式由 ROS 方案(%s)决定: %s",
+                        get_ros_plan().version.value, mode)
+        return build_data_source(mode)
 
     def _switch_source(self, mode: str) -> None:
         """停止当前数据源、构造并启动新的数据源。
@@ -376,6 +416,16 @@ class MonitorService:
             return
         self._last_ros_probe_at = now
 
+        # ROS1 方案下没有可用的 ros 数据源（现有 ros_bridge_node 是 ROS2 节点），
+        # 必须禁止切回，否则会把 ROS1 环境错误地切到 ROS2 桥接上反复重试。
+        plan = get_ros_plan()
+        if plan.profile is None or plan.profile.ros_impl == "none":
+            logger.debug(
+                "当前 ROS 方案(%s)不支持 ros 数据源，保持 sniff，不尝试切回",
+                plan.version.value,
+            )
+            return
+
         # auto 下到底该切回哪种 ros 实现，由 LITE3_ROS_IMPL 决定
         target = "ros_direct" if data_source_config.ros_impl == "direct" else "ros"
         probe = (self._probe_ros_direct_available if target == "ros_direct"
@@ -442,7 +492,14 @@ class MonitorService:
         # 以实际生效的数据源模式为准（ros / sniff / bind）
         stats["mode"] = self.data_source_mode
         stats["data_source"] = self.data_source_mode
-        return self.state.get_status(stats, service_config.push_hz)
+        result = self.state.get_status(stats, service_config.push_hz)
+        # 附带 ROS 版本与方案状态，便于前端/排障一眼看穿是否走了回退
+        plan = get_ros_plan()
+        result.ros_version = plan.version.value
+        result.ros_source = plan.source
+        result.ros_degraded = plan.degraded
+        result.ros_error = plan.error or ""
+        return result
 
 
 service = MonitorService()
@@ -477,6 +534,17 @@ async def lifespan(app: FastAPI):  # noqa: ANN201 - FastAPI 生命周期钩子
         "Lite3 Robot Monitor 启动: UDP %s:%s, HTTP %s:%s",
         udp_config.host, udp_config.port, service_config.host, service_config.port,
     )
+    # 启动即裁决 ROS 方案并显式落日志：
+    # 正常 → INFO 打出版本/来源/生效数据源；失败 → ERROR 打出原因并回退，绝不静默。
+    # 严格模式(LITE3_ROS_STRICT=true)下这里会抛异常终止启动。
+    _ros_plan = get_ros_plan()
+    logger.info(
+        "ROS 方案: version=%s source=%s degraded=%s 生效数据源=%s",
+        _ros_plan.version.value, _ros_plan.source, _ros_plan.degraded,
+        _ros_plan.effective_data_source_mode,
+    )
+    if _ros_plan.error:
+        logger.error("ROS 方案切换异常: %s", _ros_plan.error)
     await service.start()
     logger.info(
         "数据源模式: %s（ros=订阅 ROS topic / sniff=旁路抓包 / bind=绑定端口）",
@@ -521,6 +589,21 @@ async def get_state() -> MonitorState:
 async def get_status() -> ServiceStatus:
     """获取服务与链路运行状态。"""
     return service.status()
+
+
+@app.get("/api/ros", tags=["state"])
+async def get_ros() -> Dict[str, Any]:
+    """ROS 版本识别结果与当前生效方案（含检测轨迹，供排障）。
+
+    字段：
+      version   —— ros1 / ros2 / unknown
+      source    —— manual-cli / manual-env / auto / fallback
+      degraded  —— 是否因失败走了回退
+      error     —— 失败原因（为空即正常）
+      detection —— 自动检测时每条信号的命中情况
+      profile   —— 该版本声明的执行方案（发现命令、采集方式、数据源策略）
+    """
+    return get_ros_plan().to_dict()
 
 
 @app.get("/api/raw", response_model=RawPacketResponse, tags=["debug"])
@@ -864,10 +947,28 @@ async def unhandled_exception_handler(request, exc):  # noqa: ANN001, ANN201
     return JSONResponse(status_code=500, content={"detail": "服务器内部错误", "error": str(exc)})
 
 def main() -> None:
-    """命令行入口：python main.py。
+    """命令行入口：python main.py [--ros-version auto|ros1|ros2]。
 
-    等价于 `uvicorn main:app --host ... --port ...`
+    手动指定的版本优先级高于自动检测。systemd 场景请改用环境变量
+    ``LITE3_ROS_VERSION``（等价，且不需要改 unit 的 ExecStart）。
     """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Lite3 机器人监控后端")
+    parser.add_argument(
+        "--ros-version",
+        choices=("auto", "ros1", "ros2"),
+        default=None,
+        help="手动指定 ROS 版本；优先级高于自动检测，也高于 LITE3_ROS_VERSION",
+    )
+    args = parser.parse_args()
+
+    if args.ros_version:
+        # 必须写进环境变量：uvicorn.run("main:app") 会重新 import main/config，
+        # 进程内的全局变量在该模块实例里不可见，只有环境变量能可靠传递。
+        os.environ["LITE3_ROS_VERSION"] = args.ros_version
+        print("手动指定 ROS 版本: %s（优先级高于自动检测）" % args.ros_version)
+
     import uvicorn
 
     uvicorn.run(
