@@ -1,5 +1,6 @@
-** This session may be vulnerable to "store now, decrypt later" attacks.
 # SCAN-Planner 部署到 103 主机：评估结论与方案
+
+> 本目录是阶段性实施记录。当前可运行脚本位于 `/home/jack/lite3Code/scan_planner/scripts/`，其代码与部署说明以 `lite3Code` 当前版本为准；本页的“已执行”和配置数据只对应下述记录日期，不代表主机此刻状态。两库对应关系见 [协作索引](../codebase-map.md)。
 
 > 目标仓库：https://github.com/wuyi2121/SCAN-Planner （main 分支，ROS 1 版）
 > 目标主机：103（lite3-f20-1-103 / 192.168.1.103，用户 ysc）

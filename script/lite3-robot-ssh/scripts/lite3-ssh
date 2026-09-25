@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+robot_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+robot_config="${LITE3_SSH_CONFIG:-$robot_dir/../config/hosts.conf}"
+
+usage() {
+    printf '%s\n' \
+        '用法：lite3-ssh --check [主机名 ...]' \
+        '      lite3-ssh 主机名 [远端命令 ...]' \
+        '主机名及必需热点 SSID 从 config/hosts.conf 读取。'
+}
+
+die() {
+    printf '%s\n' "$*" >&2
+    exit 2
+}
+
+[[ -r "$robot_config" ]] || die "配置文件不可读：$robot_config"
+declare -A robot_ssids=() robot_aliases=() robot_ips=() robot_users=()
+robot_names=()
+robot_line_no=0
+while IFS= read -r robot_line || [[ -n "$robot_line" ]]; do
+    ((robot_line_no+=1))
+    [[ "$robot_line" =~ ^[[:space:]]*(#|$) ]] && continue
+    robot_delimiters="${robot_line//[^|]/}"
+    [[ ${#robot_delimiters} -eq 4 ]] || die "$robot_config:$robot_line_no：需要 5 个以 | 分隔的字段"
+    IFS='|' read -r robot_name robot_ssid robot_alias robot_ip robot_user <<< "$robot_line"
+    [[ "$robot_name" =~ ^[a-zA-Z0-9_.-]+$ &&
+       "$robot_alias" =~ ^[a-zA-Z0-9_.-]+$ &&
+       "$robot_user" =~ ^[a-zA-Z0-9_.-]+$ &&
+       -n "$robot_ssid" ]] || die "$robot_config:$robot_line_no：名称、SSID、别名或用户无效"
+    [[ "$robot_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] ||
+        die "$robot_config:$robot_line_no：目标地址必须是 IPv4"
+    IFS='.' read -r -a robot_octets <<< "$robot_ip"
+    for robot_octet in "${robot_octets[@]}"; do
+        ((10#$robot_octet <= 255)) || die "$robot_config:$robot_line_no：IPv4 地址无效"
+    done
+    [[ ! -v robot_ssids[$robot_name] ]] || die "$robot_config:$robot_line_no：主机名重复：$robot_name"
+    robot_names+=("$robot_name")
+    robot_ssids[$robot_name]="$robot_ssid"
+    robot_aliases[$robot_name]="$robot_alias"
+    robot_ips[$robot_name]="$robot_ip"
+    robot_users[$robot_name]="$robot_user"
+done < "$robot_config"
+(("${#robot_names[@]}" > 0)) || die "配置文件没有主机：$robot_config"
+
+for robot_dependency in nmcli iw socat ssh timeout; do
+    command -v "$robot_dependency" >/dev/null 2>&1 || die "缺少依赖：$robot_dependency"
+done
+
+hotspot_interface() {
+    local wanted_ssid="$1" iface current_ssid
+    while IFS= read -r iface; do
+        [[ "$iface" =~ ^[a-zA-Z0-9_.-]+$ ]] || continue
+        current_ssid="$(iw dev "$iface" link 2>/dev/null |
+            sed -n 's/^[[:space:]]*SSID: //p' | head -n 1)"
+        if [[ "$current_ssid" == "$wanted_ssid" ]]; then
+            printf '%s\n' "$iface"
+            return 0
+        fi
+    done < <(nmcli -t -f DEVICE,TYPE device status | awk -F: '$2 == "wifi" {print $1}')
+    return 1
+}
+
+prepare_host() {
+    local name="$1" ssh_config
+    [[ -v robot_ssids[$name] ]] || die "配置中没有主机：$name"
+    robot_iface="$(hotspot_interface "${robot_ssids[$name]}")" ||
+        die "$name：未连接要求的热点 ${robot_ssids[$name]}；已停止连接"
+    robot_alias="${robot_aliases[$name]}"
+    ssh_config="$(ssh -G "$robot_alias")" || die "$name：SSH 别名不可解析"
+    robot_host="$(awk 'tolower($1) == "hostname" {print $2; exit}' <<< "$ssh_config")"
+    robot_user="$(awk 'tolower($1) == "user" {print $2; exit}' <<< "$ssh_config")"
+    robot_port="$(awk 'tolower($1) == "port" {print $2; exit}' <<< "$ssh_config")"
+    [[ "$robot_host" == "${robot_ips[$name]}" && "$robot_user" == "${robot_users[$name]}" ]] ||
+        die "$name：SSH 别名 $robot_alias 与配置中的 ${robot_users[$name]}@${robot_ips[$name]} 不一致"
+    [[ "$robot_port" =~ ^[0-9]{1,5}$ ]] && ((robot_port >= 1 && robot_port <= 65535)) ||
+        die "$name：SSH 端口无效：$robot_port"
+    printf '已确认热点：%s（%s）；目标：%s@%s:%s\n' \
+        "${robot_ssids[$name]}" "$robot_iface" "$robot_user" "$robot_host" "$robot_port" >&2
+}
+
+if [[ "${1:-}" == '--check' ]]; then
+    shift
+    if (($# == 0)); then
+        set -- "${robot_names[@]}"
+    fi
+    robot_failed=0
+    for robot_name in "$@"; do
+        prepare_host "$robot_name"
+        if timeout 7 socat -u /dev/null \
+            "TCP4:$robot_host:$robot_port,interface=$robot_iface,connect-timeout=4" \
+            >/dev/null 2>&1; then
+            printf '%s：SSH 端口可经热点网卡访问（未验证登录）。\n' "$robot_name"
+        else
+            printf '%s：SSH 端口经热点网卡不可达。\n' "$robot_name" >&2
+            robot_failed=1
+        fi
+    done
+    exit "$robot_failed"
+fi
+
+(($# > 0)) || { usage >&2; exit 2; }
+robot_name="$1"
+shift
+prepare_host "$robot_name"
+# 只绑定此连接到热点网卡，不修改本机全局路由。
+robot_proxy="socat - TCP4:%h:%p,interface=$robot_iface,connect-timeout=8"
+exec ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=yes \
+    -o "ProxyCommand=$robot_proxy" "$robot_alias" "$@"

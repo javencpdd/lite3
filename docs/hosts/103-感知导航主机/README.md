@@ -2,9 +2,11 @@
 
 本目录保存 `ysc-f20-103`（实际 hostname 为 `lite`）的 `/home/ysc` 审计报告。该机承担 ROS 感知、定位、建图、导航与传输侧职责；跨主机配置基线见 [`../../operations/host-maintenance.md`](../../operations/host-maintenance.md)。
 
+103 上建立的功能复现代码已单独整理为 `/home/jack/lite3Code`（[仓库](https://github.com/javencpdd/lite3Code)）。本目录是主机审计，不是该代码库的部署入口；YOLO、监控面板、SCAN-Planner 等模块的当前脚本请按 [两库协作索引](../../codebase-map.md)定位。
+
 ## 专题目录
 
-新增：[lite_cog_ros2 源码导读](lite_cog_ros2/README.md)（2026-09-16）。包含全部 12 个一级目录的独立笔记、50 份功能包清单及源码采集索引；保留本目录原有专题作为历史资料。此次实际连接别名为 `lite3-f20-1-103`（`ysc@192.168.1.103`），不要把文档中的历史名称直接当作可用 SSH 别名。
+新增：[lite_cog_ros2 源码导读](lite_cog_ros2/README.md)（2026-09-16）。包含全部 12 个一级目录的独立笔记、50 份功能包清单及源码采集索引；保留本目录原有专题作为历史资料。旧报告中的 `lite3-f20-1-103` 是历史别名；本机当前技能配置使用 `ysc-f20-103`，实际连接前仍需核对 [SSH 技能配置](../../../script/lite3-robot-ssh/config/hosts.conf) 和 `ssh -G` 解析结果。
 
 | 目录 | 内容 | 使用方式 |
 | --- | --- | --- |

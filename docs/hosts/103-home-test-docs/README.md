@@ -1,5 +1,7 @@
 # lite3Code
 
+> **历史副本提示**：本目录保留了 103 功能复现仓库的部分文档快照，不自动同步。其部分 `note/` 文件已与 `/home/jack/lite3Code/note/` 不同；以下原始说明仅供追溯。当前源码、部署脚本与复现步骤先看 [lite3Code](https://github.com/javencpdd/lite3Code)；两库关系见 [协作索引](../../codebase-map.md)。
+
 Lite3 四足机器人**感知导航主机**（Jetson Xavier NX · Ubuntu 20.04 · ROS1 + ROS2）上的功能复现仓库：
 视频检测推流、机器狗监控面板、路径规划与远程可视化，以及配套的部署与排障文档。
 

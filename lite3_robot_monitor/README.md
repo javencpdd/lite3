@@ -1,5 +1,7 @@
 # Lite3 Robot Monitor
 
+> **版本边界**：本目录是 `lite3` 笔记库保留的早期监控应用及前端原型，不是 103 主机功能复现仓库的完整当前部署版本。本目录有 `frontend/`，但没有下文历史说明中提到的 `deploy/` 和部分后端文件。部署 103 时请先核对 `/home/jack/lite3Code/lite3_robot_monitor/` 的实际文件及其文档；本库与代码库的对应关系见 [协作索引](../docs/codebase-map.md)。
+
 把原先基于 **Python Tkinter** 的 Lite3 状态接收工具（`script/lite3_robot_state_receiver.py`）改造成 **前后端分离的 Web 监控系统**。
 
 > 通过浏览器访问监控页面，即可实时查看 Lite3 四足机器人通过 UDP 上报的状态数据。
@@ -214,14 +216,16 @@ journalctl -u lite3-monitor -n 50 --no-pager
 ```
 
 > 部署细节（为什么不能 bind 43897、监听模式、多实例、增量更新、排错表）
-> 见第五节与 [`deploy/README.md`](deploy/README.md)。
+> 见第五节历史说明；当前部署请核对 [`lite3Code` 的部署文档](https://github.com/javencpdd/lite3Code/blob/main/lite3_robot_monitor/deploy/README.md)。
 
 ---
 
 ## 五、部署到 103 感知导航主机
 
+> **历史流程，勿直接照搬**：本库已无下文所述 `deploy/`，当前部署脚本在 `lite3Code/lite3_robot_monitor/deploy/`。先核对该仓库的实际文件、适用分支和 103 状态。
+
 > 正式运行环境：**103（Jetson Xavier NX，Ubuntu 20.04 / Python 3.8，用户 `ysc`，IP 192.168.1.103）**
-> 安装目录：`/home/test/monitor`　详细运维与排错见 [`deploy/README.md`](deploy/README.md)。
+> 安装目录：`/home/test/monitor`　当前运维与排错见 [`lite3Code` 的部署文档](https://github.com/javencpdd/lite3Code/blob/main/lite3_robot_monitor/deploy/README.md)。
 
 ### 5.1 为什么不能直接在 103 上 bind 43897
 
@@ -251,7 +255,7 @@ Monitor 抢走 43897 → transfer_ros2 收不到状态
 > `LITE3_DATA_SOURCE`，决定状态来自 sniff 还是 ROS 话题订阅；
 > 其中话题订阅又有 `bridge`（外部 ros_bridge_node 转发）与 `ros_direct`
 > （后端内嵌 rclpy 订阅，可省掉桥接进程，但仅限 103 运行）两种实现，
-> 详见 [`docs/ros_bridge.md`](docs/ros_bridge.md)。
+> 该 `docs/ros_bridge.md` 未随本库原型保留；现行实现与说明请核对 `lite3Code/lite3_robot_monitor/` 和 `lite3Code/note/02-机器狗监控面板.md`。
 
 ### 5.3 部署步骤
 
@@ -300,7 +304,7 @@ curl http://127.0.0.1:8000/api/status
 | `connected` 一直 false | 先确认 103 有没有收到：`sudo tcpdump -i any -nn udp dst port 43897 -c 5` |
 | 抓到无关流量太多 | 设置 `LITE3_UDP_IFACE` 为业务网网卡名（连 `192.168.1.120` 的那张） |
 
-完整排错表与回滚步骤见 [`deploy/README.md`](deploy/README.md)。
+当前排错表与回滚步骤见 [`lite3Code` 的部署文档](https://github.com/javencpdd/lite3Code/blob/main/lite3_robot_monitor/deploy/README.md)。
 
 ### 5.6 改完代码怎么更新（不必重跑 install.sh）
 
@@ -513,7 +517,7 @@ cd /home/test/monitor
 ### 12.1 协议来源
 
 依据**厂商文档《运动主机 UDP 通讯接口》**，摘录已存档于
-[`docs/protocol/lite3-udp-protocol.md`](docs/protocol/lite3-udp-protocol.md)（含 1.1 协议格式、1.2 控制指令集、1.3 接收指令集）。
+历史引用的 `docs/protocol/lite3-udp-protocol.md` 未随本库原型保留；协议细节应以当前代码仓库中的解析器、厂商文档和实测为准。
 
 ### 12.2 报文格式（文档 1.1 节）
 
