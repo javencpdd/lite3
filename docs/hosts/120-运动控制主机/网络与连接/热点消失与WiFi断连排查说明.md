@@ -219,7 +219,7 @@ p2p0:  CTRL-EVENT-CHANNEL-SWITCH       freq=2472 ... cf1=2472   ← AP 被强行
 ```
 
 > **权限提醒（已实测）**：`ysc` 用户**不在 `adm` 组**，直接 `cat /var/log/syslog` 会被拒绝（权限 `640 root:adm`）。
-> 现场必须用 `sudo` 读取，或把 `ysc` 加入 `adm` 组（见 4.6.4）。
+> 现场必须用 `sudo` 读取，或把 `ysc` 加入 `adm` 组（见 4.6.5）。
 
 ### 4.2 应采集的信息清单
 
@@ -458,7 +458,7 @@ sudo tail -5 /var/log/wifi_watchdog/wifi_watch.log
 
 ```bash
 sudo tee /etc/logrotate.d/wifi_watchdog >/dev/null <<'EOF'
-/var/log/wifi_watchdog/*.log {
+/var/log/wifi_watchdog/wifi_watch.log {
     daily
     rotate 14
     compress
@@ -471,6 +471,11 @@ EOF
 sudo logrotate -d /etc/logrotate.d/wifi_watchdog   # 干跑校验
 ```
 
+> **注意：只让 logrotate 管 `wifi_watch.log` 这一个文件，不要写 `*.log`。**
+> `incident_*.log` 是动态新增的（每次故障一个），若被 logrotate 的 glob 命中，
+> 每个文件都会各自产生 `.1.gz` ~ `.14.gz` 副本，文件数量成倍膨胀。
+> **incident 文件由脚本自身清理**（见下节）。
+
 同时确认 rsyslog 的轮转保留足够长：
 
 ```bash
@@ -479,14 +484,52 @@ grep -E "rotate|daily|weekly" /etc/logrotate.d/rsyslog
 
 建议将 `rotate` 提高到 `14` 以上，确保能覆盖两周内的故障。
 
-#### 4.6.4 让运维账号可直接读日志（免 sudo）
+#### 4.6.4 看门狗日志的滚动与体积控制（脚本内置）
+
+`wifi_watchdog.sh` 自身带**三重体积保护**，无需额外配置即可防止撑满磁盘
+（120 主机根分区仅 28 GiB，已用 56%，此项必须保证）：
+
+| 层级 | 机制 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| 1 | 主日志按大小轮转 | 10 MB → gzip | `wifi_watch.log` 超限即归档压缩 |
+| 2 | 归档保留期 | 7 天 | 超过 7 天的 `.gz` 自动删除 |
+| 3 | 目录总量上限 | 50 MB | 超限时从**最旧的** `incident_*` 开始删 |
+| 4 | 抓证节流 | 5 分钟 | 持续故障期间**不再每分钟生成新档案**，只往现有档案追加一行 |
+
+> **第 4 条最关键**：早期版本每分钟都会新建一个 `incident_*.log`（每个 15–40 KB）。
+> 若热点持续中断一小时就是 60 个文件，一整天可达 1400+ 个、约 50 MB。
+> 现在同一故障每 5 分钟才做一次完整抓证，其余只追加状态行，
+> **既能看清故障持续时长，又不会产生大量重复档案**。
+
+参数可在脚本头部按需调整：
+
+```bash
+RETENTION_DAYS=7          # 归档保留天数
+INCIDENT_COOLDOWN=300     # 完整抓证间隔（秒）
+MAX_DIR_MB=50             # 目录体积上限（MB）
+LOG_ROTATE_BYTES=10485760 # 主日志轮转阈值（字节）
+```
+
+**验证：**
+
+```bash
+# 查看当前占用
+du -sh /var/log/wifi_watchdog
+ls -1 /var/log/wifi_watchdog | wc -l
+
+# 人为压测：临时把阈值调小后连续运行，观察是否触发轮转与清理
+sudo logrotate -f /etc/logrotate.d/wifi_watchdog
+du -sh /var/log/wifi_watchdog
+```
+
+#### 4.6.5 让运维账号可直接读日志（免 sudo）
 
 ```bash
 sudo usermod -aG adm ysc
 # 重新登录后生效
 ```
 
-#### 4.6.5 滚动保存方案验收标准
+#### 4.6.6 滚动保存方案验收标准
 
 | 验收项 | 标准 |
 | --- | --- |
@@ -621,22 +664,29 @@ sudo nmcli con down Tenda_FCFA20 && sudo nmcli con up Tenda_FCFA20
 sudo systemctl restart NetworkManager
 ```
 
-**【根治】部署自愈看门狗**，在检测到异常时自动恢复，避免长时间失联：
+**【根治】部署自愈看门狗**，在检测到异常时自动恢复，避免长时间失联。
 
-在 4.6.2 的 `wifi_watchdog.sh` 异常分支中追加：
+`scripts/wifi_watchdog.sh` **已内置**该自愈逻辑（异常分支中自动执行，无需再手工追加）：
 
 ```bash
-    # 先尝试软件层自愈
-    nmcli con up "myap50G"      >/dev/null 2>&1
-    nmcli con up "Tenda_FCFA20" >/dev/null 2>&1
-    sleep 15
-    # 复检，仍异常则记录并标记需重启
-    if [ -z "$(iw dev $AP_IF info 2>/dev/null | grep 'type AP')" ]; then
-        logger -t wifi_watchdog "SOFT_RECOVERY_FAILED: 需人工重启"
-    else
-        logger -t wifi_watchdog "SOFT_RECOVERY_OK"
-    fi
+# 先尝试软件层自愈
+nmcli con up "$AP_CON"  >/dev/null 2>&1
+nmcli con up "$STA_CON" >/dev/null 2>&1
+sleep 15
+# 复检：仍异常则标记需人工重启
+if [ -z "$(iw dev "$AP_IF" info 2>/dev/null | grep 'type AP')" ] \
+   || [ "$(iw dev "$STA_IF" link 2>/dev/null | grep -c 'Connected to')" -eq 0 ]; then
+    echo "$TS SOFT_RECOVERY_FAILED 软件层自愈无效，需人工重启" >> "$TARGET"
+    logger -t wifi_watchdog "SOFT_RECOVERY_FAILED: 软件层自愈无效，需人工重启"
+else
+    echo "$TS SOFT_RECOVERY_OK" >> "$TARGET"
+    logger -t wifi_watchdog "SOFT_RECOVERY_OK"
+fi
 ```
+
+> **这条日志本身是重要判据**：若每次故障都记录 `SOFT_RECOVERY_FAILED`，
+> 说明软件层重开始终无效，反过来印证故障点在**驱动 / 固件 / 硬件层**（D1、H1、E1），
+> 而不是 NetworkManager 配置问题。
 
 ### 5.6 针对硬件与供电（H1、H2、E1）
 
