@@ -1,5 +1,9 @@
 # Lite3 Robot Monitor
 
+  git config --global user.email "1904650862@qq.com"
+  git config --global user.name "jack"
+
+
 > **版本边界**：本目录是 `lite3` 笔记库保留的早期监控应用及前端原型，不是 103 主机功能复现仓库的完整当前部署版本。本目录有 `frontend/`，但没有下文历史说明中提到的 `deploy/` 和部分后端文件。部署 103 时请先核对 `/home/jack/lite3Code/lite3_robot_monitor/` 的实际文件及其文档；本库与代码库的对应关系见 [协作索引](../docs/codebase-map.md)。
 
 把原先基于 **Python Tkinter** 的 Lite3 状态接收工具（`script/lite3_robot_state_receiver.py`）改造成 **前后端分离的 Web 监控系统**。
@@ -220,8 +224,139 @@ curl -s http://127.0.0.1:8000/api/status          # 接口自检
 journalctl -u lite3-monitor -n 50 --no-pager
 ```
 
-> 部署细节（为什么不能 bind 43897、监听模式、多实例、增量更新、排错表）
-> 见第五节历史说明；当前部署请核对 [`lite3Code` 的部署文档](https://github.com/javencpdd/lite3Code/blob/main/lite3_robot_monitor/deploy/README.md)。
+### 4.4 部署后手册：怎么用 / 怎么配 / 怎么更新
+
+> 服务装好之后的日常操作都在这里。部署原理（为什么不能 bind 43897、多实例、排错表）
+> 见 [第五节](#五部署到-103-感知导航主机) 与 [`deploy/README.md`](deploy/README.md)，
+> 踩坑案例见 [`note/`](note/README.md)。
+
+#### 4.4.1 怎么用
+
+| 你想做的事 | 怎么做 |
+| --- | --- |
+| 看监控面板 | 浏览器打开 <http://192.168.1.103:8000> |
+| 查接口文档 | <http://192.168.1.103:8000/docs>（FastAPI 自动生成） |
+| 查运行状态 | `curl -s http://127.0.0.1:8000/api/status` |
+| 查数据源模式 | `curl -s http://127.0.0.1:8000/api/source` |
+| 查 ROS 版本识别 | `curl -s http://127.0.0.1:8000/api/ros` |
+| 看最近原始报文 | `curl -s http://127.0.0.1:8000/api/raw` |
+| 实时数据（程序接入） | WebSocket `ws://192.168.1.103:8000/ws/state`，10Hz 推送 |
+
+面板展示：机器人连接状态、12 个关节角度/温度、IMU、里程计、电量、
+原始报文十六进制预览等（详见 [第六节](#六接口说明) 与 [第九节](#九验收对照)）。
+
+**控制机器人（可选，默认关闭）**：控制通道直连运动主机、绕过 VOA 安全层，
+必须先读 [第十二节](#十二控制通道写方向)，再按 12.7 的典型顺序操作
+（启用通道 → 起立 → 切自主模式 → 开心跳 → 发速度指令 → 停止）。
+
+**机器人没上电时**想验证链路，用内置模拟器：
+
+```bash
+cd /home/test/monitor
+/home/test/monitor/.venv/bin/python tools/mock_sender.py     # 向 127.0.0.1:43897 发 10Hz 数据
+```
+
+#### 4.4.2 怎么配
+
+配置集中在 `backend/config.py`，**全部可用环境变量覆盖**。三种改法：
+
+| 方式 | 适用场景 | 操作 |
+| --- | --- | --- |
+| **unit 里加 `Environment=`**（推荐） | 长期生效、随服务重启保持 | `sudo systemctl edit lite3-monitor` 写 `[Service]` 段 |
+| 改 `backend/config.py` 默认值 | 改代码默认行为 | 改完需同步到 103 并重启（见 4.4.3） |
+| 前台临时指定 | 调试 | `sudo LITE3_XXX=... ../.venv/bin/python -m uvicorn ...` |
+
+用 drop-in 改（**推荐，不会被 `install.sh` 覆盖**）：
+
+```bash
+sudo systemctl edit lite3-monitor
+```
+
+```ini
+[Service]
+Environment=LITE3_UDP_MODE=sniff
+Environment=LITE3_UDP_IFACE=eth0
+```
+
+> ⚠️ **改完必须重启**：配置是 **frozen dataclass**，在 import 时固化，不重启不生效。
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart lite3-monitor
+```
+
+高频配置项速查（**完整表见 [第七节](#七配置项)**）：
+
+| 变量 | 默认 | 用途 |
+| --- | --- | --- |
+| `LITE3_UDP_MODE` | `auto` | 监听模式，103 上建议显式写 `sniff` |
+| `LITE3_UDP_IFACE` | 空 | 抓包网卡，建议填连 `192.168.1.120` 的那张 |
+| `LITE3_DATA_SOURCE` | `auto` | 数据源：ROS 为主 + sniff 兜底（双向自愈） |
+| `LITE3_HTTP_PORT` | `8000` | HTTP 端口（多实例 `8000+TAG`） |
+| `LITE3_CTRL_ENABLED` | `false` | 控制通道，**建议保持 false** |
+| `LITE3_ROS_VERSION` | `auto` | ROS 版本手动指定（详见 [第十三节](#十三ros-版本识别与方案切换)） |
+
+#### 4.4.3 怎么更新
+
+**日常改代码走增量更新**（不删、不重装、不重跑 install.sh）：
+
+```bash
+# 1) 同步后端（排除缓存）
+sudo rsync -av --exclude '__pycache__' --exclude '*.pyc' \
+  /home/test/lite3_robot_monitor/backend/ /home/test/monitor/backend/
+
+# 2) 清旧字节码，避免用到过期 .pyc
+sudo find /home/test/monitor/backend -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null
+
+# 3) 重启（配置 frozen，不重启不生效）
+sudo systemctl restart lite3-monitor
+```
+
+前端改动：本地 `npm run build` 后只同步产物：
+
+```bash
+rsync -av /path/to/lite3_robot_monitor/frontend/dist/ \
+  ysc@192.168.1.103:/home/test/monitor/frontend/dist/
+```
+
+**只有这 4 种情况才重跑 `install.sh`**：改了 `requirements.txt`、改了 `deploy/*.service`、
+要部署新构建的 `frontend/dist`、首次安装或换安装目录。
+
+完整重部署（笔记本 → 103）：
+
+```bash
+cd frontend && npm run build && cd ..     # 必须先构建，否则 103 上前端会被删坏
+bash deploy/pack.sh
+scp lite3-monitor-deploy.tar.gz ysc@192.168.1.103:/home/test/
+# 103 上
+cd /home/test && tar xzf lite3-monitor-deploy.tar.gz
+sudo bash lite3_robot_monitor/deploy/install.sh /home/test/monitor
+```
+
+> ⚠️ `install.sh` 会 `rm -rf $TARGET/frontend` 再拷贝新 `dist`；
+> **如果这次打包没带 `dist`，旧前端会被删且没有新内容补上 → 页面白屏**。
+> 顺序必须是「构建 → 打包 → 安装」。
+
+#### 4.4.4 出问题先看哪
+
+**第一步永远是这条**（一句话把问题切成"数据没来"和"我没抓到"）：
+
+```bash
+sudo tcpdump -i any -nn udp dst port 43897 -c 5
+```
+
+- 有输出 → 数据到了，问题在 Monitor（查 `LITE3_UDP_IFACE`、CAP_NET_RAW 权限）
+- 无输出 → 数据没到 103，去查 120 侧 `jy_exe/conf/network.toml`
+
+| 现象 | 处理 |
+| --- | --- |
+| `udp_mode` 是 `bind` | 抓包降级了，`journalctl -u lite3-monitor -n 50` 看权限错误 |
+| `connected` 一直 false | 按上面的 tcpdump 分流排查 |
+| 页面打不开 | `systemctl status lite3-monitor` + `sudo ufw allow 8000/tcp` |
+| 改了配置没生效 | 没重启（见 4.4.2） |
+
+完整排错表见 [`deploy/README.md`](deploy/README.md) 第四节，
+按主题整理的踩坑案例见 [`note/`](note/README.md)。
 
 ---
 
@@ -260,7 +395,8 @@ Monitor 抢走 43897 → transfer_ros2 收不到状态
 > `LITE3_DATA_SOURCE`，决定状态来自 sniff 还是 ROS 话题订阅；
 > 其中话题订阅又有 `bridge`（外部 ros_bridge_node 转发）与 `ros_direct`
 > （后端内嵌 rclpy 订阅，可省掉桥接进程，但仅限 103 运行）两种实现，
-> 该 `docs/ros_bridge.md` 未随本库原型保留；现行实现与说明请核对 `lite3Code/lite3_robot_monitor/` 和 `lite3Code/note/02-机器狗监控面板.md`。
+> 详见本仓库 [`docs/ros_bridge.md`](docs/ros_bridge.md)；
+> 排错见 [`docs/ros_troubleshooting.md`](docs/ros_troubleshooting.md)。
 
 ### 5.3 部署步骤
 
@@ -270,10 +406,13 @@ cd frontend && npm run build
 
 # 2) 笔记本：打包（自动剔除 node_modules，几百 MB → 几十 KB）
 bash deploy/pack.sh
-scp lite3-monitor-deploy.tar.gz ysc@192.168.1.103:/tmp/
+scp lite3-monitor-deploy.tar.gz ysc@192.168.1.103:/home/test/
 
 # 3) 103：解压并安装（自动建 venv、装依赖、抓包自检、注册 systemd 并启动）
+#    解压出的 /home/test/lite3_robot_monitor 即「本机源码树」，
+#    后续增量更新就是从它 rsync 到 /home/test/monitor（见 4.4.3）
 ssh ysc@192.168.1.103
+cd /home/test && tar xzf lite3-monitor-deploy.tar.gz
 cd /tmp && tar xzf lite3-monitor-deploy.tar.gz
 sudo bash lite3_robot_monitor/deploy/install.sh /home/test/monitor
 ```
@@ -422,6 +561,15 @@ rsync -av /path/to/lite3_robot_monitor/frontend/dist/ ysc@192.168.1.103:/home/te
 | `LITE3_ROS_TOPIC_JOINTS` | `/joint_states` | 同上 |
 | `LITE3_ROS_STALE_TIMEOUT` | `10.0` | ROS 曾正常后断流多少秒判定失效并降级 |
 | `LITE3_ROS_RETRY_INTERVAL` | `15.0` | 处于 sniff 兜底时，每隔多少秒探测 ROS 是否恢复 |
+
+**ROS 版本识别相关**（详见第十三章）：
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `LITE3_ROS_VERSION` | `auto` | 手动指定 ROS 版本：`auto`（自动检测）/ `ros1` / `ros2`；**优先级高于自动检测** |
+| `LITE3_ROS_STRICT` | `false` | 严格模式：识别失败时 `true`=抛异常终止启动，`false`=报错后回退安全默认 |
+| `LITE3_ROS_FALLBACK_MODE` | `sniff` | 回退时使用的数据源模式（sniff 与 ROS 版本无关，是唯一两头安全的选项） |
+| `LITE3_ROS_DETECT_TIMEOUT` | `3.0` | 自动检测时单条外部命令（如 `systemctl`）的超时秒数 |
 
 **控制通道相关**：
 
@@ -650,3 +798,138 @@ struct Command {
 ```
 
 ---
+
+## 十三、ROS 版本识别与方案切换
+
+> 103 上**同时装有 ROS1（noetic）与 ROS2（foxy）**，两套 transfer **抢同一个 UDP 43897**。
+> 监控必须知道自己当前身处哪个版本，因为两者可用的数据接入方式不同：
+>
+> - **ROS2**：可用 `ros_bridge_node`（43900）转发或内嵌 rclpy 订阅；
+> - **ROS1**：**没有**对应的桥接（现有桥接节点是 ROS2 的），只能用 sniff 旁路抓包。
+>
+> 本章描述的就是"自动识别当前版本 + 加载对应执行方案"的能力。
+> 相关代码：`backend/ros_env.py`、`backend/ros_profiles.py`、`backend/ros_switch.py`。
+
+### 13.1 三层解耦
+
+| 文件 | 职责 | 说明 |
+| --- | --- | --- |
+| `ros_env.py` | **只检测** | 判断 ROS1 / ROS2 / UNKNOWN，纯 stdlib，可独立运行 |
+| `ros_profiles.py` | **只声明** | 各版本的话题/节点发现命令、进程与资源采集方式、数据源策略 |
+| `ros_switch.py` | **只裁决** | 手动 > 自动的优先级、失败报错与回退 |
+
+检测与执行解耦，新增一个 ROS 版本只需在 `ros_profiles.py` 加一条声明。
+
+### 13.2 检测信号优先级
+
+按可信度从高到低，取**第一个明确无歧义**的信号：
+
+| 顺序 | 信号 | 判据 |
+| --- | --- | --- |
+| 1 | `env_version` | 环境变量 `ROS_VERSION` |
+| 2 | `env_distro` | `ROS_DISTRO`（noetic/melodic…→ROS1；foxy/humble…→ROS2） |
+| 3 | `env_marker` | `AMENT_PREFIX_PATH`→ROS2；`ROS_MASTER_URI`/`ROS_ROOT`→ROS1 |
+| 4 | **`process`** | 实际在跑的进程：`jetson2motion`→ROS2，`qnx2ros`→ROS1 |
+| 5 | `systemd_service` | 同 `print_ros_version.sh`：`systemctl is-enabled transfer` |
+| 6 | `install_path` | `/opt/ros/<distro>` 扫描（仅结果唯一时采信） |
+| 7 | `executable` | PATH 上的 `ros2` / `roscore`（仅结果唯一时采信） |
+
+**为什么 `process` 排在参考脚本的 systemd 判据之前**：`print_ros_version.sh` 用
+`systemctl is-enabled transfer` 判断，但 ROS1 链路是 `start_transfer.sh` **脚本拉起**、
+并非 systemd 常驻，此时该判据会**误判为 ROS2**。以真实在跑的进程更贴近事实，
+systemd 判据仅作兜底保留，以维持与参考脚本的一致性。
+
+实测 103 上 systemd 拉起服务时 `ROS_VERSION` / `ROS_DISTRO` **全部缺失**，
+且 `/opt/ros` 下 noetic 与 foxy 并存、PATH 上 `ros2` 与 `roscore` 并存 ——
+前三个信号与后两个信号都不可用，**只有 `process` 可靠**。
+
+### 13.3 手动指定（优先级高于自动检测）
+
+两个入口，同时存在时 CLI 更高：
+
+```bash
+# 方式 A：环境变量（systemd 场景用这个，写在 unit 的 [Service] 段）
+Environment=LITE3_ROS_VERSION=ros1      # 或 ros2 / auto
+
+# 方式 B：启动参数
+python main.py --ros-version ros1       # 可选值 auto / ros1 / ros2
+```
+
+> CLI 参数之所以写进环境变量再传给 uvicorn，是因为
+> `uvicorn.run("main:app")` 会重新 import 模块，进程内全局变量跨模块实例不可见。
+
+### 13.4 各版本方案差异
+
+| | ROS2 | ROS1 |
+| --- | --- | --- |
+| 话题发现 | `ros2 topic list` | `rostopic list` |
+| 节点发现 | `ros2 node list` | `rosnode list` |
+| 进程采集 | `jetson2motion` / `jetson2app` / `sensor_checker` | `rosmaster` / `qnx2ros` / `ros2qnx` / `nx2app` |
+| 数据源策略 | `ros`（桥接 43900 或内嵌 rclpy） | **`sniff`**（无 ros 桥接可用） |
+
+`LITE3_DATA_SOURCE` 显式指定为 `ros`/`sniff`/`bind`/`ros_direct` 时**尊重配置**；
+只有 `auto` 才由版本方案决定 —— 这样 ROS1 下不会再白等 ros 桥接超时。
+
+同时切回 ros 的看门狗会检查 `profile.ros_impl`，**ROS1 下禁止切回**，
+避免反复尝试切到 ROS2 桥接上。
+
+### 13.5 失败策略（禁止静默继续）
+
+检测失败 / 版本不受支持 / 手动值非法时：
+
+1. 打 **ERROR** 日志，说明具体原因（含手动值、检测轨迹、受支持列表）；
+2. 置 `degraded=true` 并保留错误文本，暴露在 `/api/ros` 与启动日志；
+3. 回退到安全默认数据源 `LITE3_ROS_FALLBACK_MODE`（默认 `sniff`，与版本无关）；
+4. 若 `LITE3_ROS_STRICT=true`，**不回退**，直接抛 `RosSwitchError` 终止启动。
+
+### 13.6 验证
+
+```bash
+# 独立检测（含每条信号的命中轨迹）
+/home/test/monitor/.venv/bin/python /home/test/monitor/backend/ros_env.py --verbose
+
+# 运行时生效情况
+curl -s http://127.0.0.1:8000/api/ros
+
+# 一键验证 4 项（自动识别 / 运行时生效 / 手动切换 / 失败回退）
+bash /home/test/monitor/tools/verify_ros_switch.sh
+```
+
+`/api/status` 也会带上 `ros_version`、`ros_source`、`ros_degraded`、`ros_error` 四个字段。
+
+### 13.7 与 `print_ros_version.sh` 的关系
+
+`/home/ysc/scripts/print_ros_version.sh` **未做任何修改**，其既有行为保持不变；
+本能力只是把它的判据（`systemctl is-enabled transfer`）复用为兜底信号之一。
+
+> ⚠️ 切换 ROS1 / ROS2 时注意：`transfer_ros2.service` 若处于 `enabled`，
+> **103 重启后会自启并抢回 43897**。长期跑 ROS1 请先
+> `sudo systemctl disable transfer_ros2.service`。详见 `note/05-部署运维.md` 5.7。
+
+### 13.8 ROS 环境切换实操
+
+本章前面的内容是**监控程序如何自适应版本**；如果你要问的是
+**"103 主机上的 ROS 环境怎么从 ROS2 切到 ROS1、怎么切回来"**，
+那是运维操作，完整步骤见 [`note/06-ROS1与ROS2环境切换.md`](note/06-ROS1与ROS2环境切换.md)，
+包含：双栈现状、端口与进程对照表、两种切换的完整命令、开机自启陷阱、对各系统的影响。
+
+最常用的一条判断命令：
+
+```bash
+printf "\047\n" | sudo -S ss -lunp | grep 43897   # jetson2motion → ROS2；qnx2ros → ROS1
+```
+
+（103 上 `sudo` 需要密码，非交互场景必须 `printf "\047\n" | sudo -S`；
+直接 `sudo ss` 会报 `a terminal is required to read the password`。）
+
+> 注意：厂商脚本 `print_ros_version.sh` 用 `systemctl is-enabled transfer` 判断，
+> 而 ROS1 是脚本拉起的、不会让该服务变成 enabled，因此**跑着 ROS1 时它仍会输出 ROS 2**
+> （误判）。判断版本请用上面这条命令或 `ros_env.py`。
+>
+> ⚠️ **切换 ROS 环境后必须重启监控服务**：ROS 方案在首次使用时计算一次并缓存
+> （`main.py` 的 `_ROS_PLAN_CACHE`），不重启的话 `/api/ros` 会一直报旧版本。
+> `sudo systemctl restart lite3-monitor.service`
+>
+> ⚠️ **双栈并存时自动判定会退化**：若 `roscore`（ROS1）与 `jetson2motion`（ROS2）
+> 同时在运行，`process` 信号会判为歧义并向下退化，命令行与在线服务可能给出**不同答案**。
+> 此时以端口归属为准，或直接用 `LITE3_ROS_VERSION=ros1|ros2` 显式指定。

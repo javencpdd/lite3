@@ -44,18 +44,19 @@ cd frontend && npm install && npm run build && cd ..
 # 打包（自动剔除 node_modules，几百 MB → 几十 KB）
 bash deploy/pack.sh
 
-# 上传（/tmp 只是上传中转站，不是安装位置）
-scp lite3-monitor-deploy.tar.gz ysc@192.168.1.103:/tmp/
+# 上传到 103（/home/test 是上传落地点，也是本机源码树所在地）
+scp lite3-monitor-deploy.tar.gz ysc@192.168.1.103:/home/test/
 ```
 
-> **为什么上传到 `/tmp`？** 它只是**一次性的上传中转站**，不是安装目录 ——
-> 真正的安装位置是下一节 `install.sh` 的参数 `/home/test/monitor`。
-> 选 `/tmp` 是因为：所有用户都可写（`drwxrwxrwt`，scp 以 `ysc` 身份必成功）、
-> 挂在磁盘而非内存盘（103 上为 `/dev/mmcblk1p1`，放大包不占内存）、
-> 且装完即可丢弃，不会把每次的压缩包堆进 `/home/test` 工作区。
-> 想换成 `/home/test/` 也完全可以（该目录属主就是 `ysc`），
-> 但要注意**别覆盖 `/home/test/lite3_robot_monitor`** —— 那是 103 上的源码树，
-> 日常增量更新就是直接从它 rsync 到 `/home/test/monitor`（见第 7 节）。
+> **为什么传到 `/home/test/` 而不是 `/tmp/`？**
+> `/home/test` 是 103 上的工作区（属主就是 `ysc`），压缩包解压后得到
+> **`/home/test/lite3_robot_monitor`** —— 这份**本机源码树**后续还要用于
+> 日常增量更新（从第 7 节的 rsync 可以看出：就是把它同步到 `/home/test/monitor`）。
+> 放在 `/tmp` 也行（同样可写、挂在磁盘），但 `/tmp` 会被系统清理，
+> 源码树就没了，之后想增量更新还得再传一次。
+>
+> ⚠️ 反过来，**`install.sh` 的安装目录不要写成 `/tmp`** —— 会被清理，
+> 服务跑几次就没了。运行目录请用 `/home/test/monitor` 这类持久路径。
 
 > 如果 `frontend/` 下没有 `dist`，`pack.sh` 会警告"未发现 frontend/dist"——
 > 此时装完只有 API、没有页面。**先 `npm run build` 再打包**，顺序不能反。
@@ -96,6 +97,11 @@ curl -s http://127.0.0.1:8000/api/status | python3 -m json.tool
 | `packets_parsed` | 持续增长 | 不涨说明没收到或没解析出报文 |
 
 然后笔记本浏览器打开 **http://192.168.1.103:8000**。
+
+> 103 上 ROS1 与 ROS2 并存且共用 43897 端口，监控会**自动识别当前版本**并加载对应方案。
+> 想确认识别结果：`curl -s http://127.0.0.1:8000/api/ros`
+> （`/api/status` 里的 `ros_version` / `ros_degraded` 字段同样可看）。
+> 需要手动指定版本或了解切换机制，见 [README.md 第十三章](README.md)。
 
 ---
 

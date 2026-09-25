@@ -144,6 +144,12 @@ cp -r "$SRC_DIR/backend"    "$TARGET/"
 cp -r "$SRC_DIR/tools"      "$TARGET/" 2>/dev/null || true
 cp    "$SRC_DIR/requirements.txt" "$TARGET/" 2>/dev/null || true
 cp    "$SRC_DIR/README.md"  "$TARGET/" 2>/dev/null || true
+# 文档一并装进运行目录，保证 /home/test/monitor 自带使用与排障说明
+# （README 里引用了 note/ 与 docs/，不同步过去会变成死链）
+# 同样因为 `set -e`，条件拷贝必须带 `|| true`
+cp    "$SRC_DIR/QUICKSTART.md" "$TARGET/" 2>/dev/null || true
+[[ -d "$SRC_DIR/note" ]] && cp -r "$SRC_DIR/note" "$TARGET/" || true
+[[ -d "$SRC_DIR/docs" ]] && cp -r "$SRC_DIR/docs" "$TARGET/" || true
 
 # 前端静态资源：只拷 dist，避免把 node_modules 一起拖到板子上
 if [[ -d "$SRC_DIR/frontend/dist" ]]; then

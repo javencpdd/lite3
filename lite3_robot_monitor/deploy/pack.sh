@@ -25,6 +25,13 @@ cp -r "$SRC_DIR/deploy"  "$PKG/"
 [[ -d "$SRC_DIR/tools" ]] && cp -r "$SRC_DIR/tools" "$PKG/"
 [[ -f "$SRC_DIR/requirements.txt" ]] && cp "$SRC_DIR/requirements.txt" "$PKG/"
 [[ -f "$SRC_DIR/README.md" ]] && cp "$SRC_DIR/README.md" "$PKG/"
+# 部署后文档：103 上排障主要靠这几份，一并带上（体积很小，合计约 100KB）
+# 不带上它们的话，README 里指向 note/ 与 docs/ 的链接在 103 上会变成死链
+# 注意：本脚本开头有 `set -e`，`[[ ]] && cp` 在条件为假时整体返回非零会中断脚本，
+# 因此每条都必须带 `|| true`。
+[[ -f "$SRC_DIR/QUICKSTART.md" ]] && cp "$SRC_DIR/QUICKSTART.md" "$PKG/" || true
+[[ -d "$SRC_DIR/note" ]] && cp -r "$SRC_DIR/note" "$PKG/" || true
+[[ -d "$SRC_DIR/docs" ]] && cp -r "$SRC_DIR/docs" "$PKG/" || true
 
 if [[ -d "$SRC_DIR/frontend/dist" ]]; then
     mkdir -p "$PKG/frontend"
@@ -48,10 +55,10 @@ cat <<EOF
 $(echo -e '\033[1;32m')打包完成$(echo -e '\033[0m')  $OUT  ($SIZE)
 
 上传到 103：
-  scp "$OUT" ysc@192.168.1.103:/tmp/
+  scp "$OUT" ysc@192.168.1.103:/home/test/
 
 在 103 上部署：
   ssh ysc@192.168.1.103
-  cd /tmp && tar xzf $(basename "$OUT")
+  cd /home/test && tar xzf $(basename "$OUT")
   sudo bash lite3_robot_monitor/deploy/install.sh /home/test/monitor
 EOF
