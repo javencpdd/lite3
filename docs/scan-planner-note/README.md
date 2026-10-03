@@ -1,12 +1,13 @@
 # SCAN-Planner 部署到 103 主机：评估结论与方案
 
-> 本目录是阶段性实施记录。当前可运行脚本位于 `/home/jack/lite3Code/scan_planner/scripts/`，其代码与部署说明以 `lite3Code` 当前版本为准；本页的“已执行”和配置数据只对应下述记录日期，不代表主机此刻状态。两库对应关系见 [协作索引](../codebase-map.md)。
+> 本目录是阶段性实施记录。当前可运行脚本位于 **103 主机的 `/home/test/scan_planner/scripts/`**（用户 `ysc`）；
+> 本页的“已执行”和配置数据只对应下述记录日期，不代表主机此刻状态。
 
 > 目标仓库：https://github.com/wuyi2121/SCAN-Planner （main 分支，ROS 1 版）
 > 目标主机：103（lite3-f20-1-103 / 192.168.1.103，用户 ysc）
 > 作业空间：`/home/test/scan_planner`
 > 文档状态：**已执行**（已 clone、已编译通过、仿真闭环跑通、Lite3 参数适配已完成并通过双次复跑）
-> 编写时间：2026-09-21　最后更新：2026-09-23 02:41
+> 编写时间：2026-09-21　最后更新：2026-09-30 03:40
 
 ## 〇、当前进度（一眼看完）
 
@@ -16,7 +17,7 @@
 | 拉取源码 | ✅ 完成 | 走代理 clone，commit `348e8a5` |
 | 编译（`-j2`，约 14 min） | ✅ 通过 | 0 错误，9 个可执行文件 + 2 个自定义 msg |
 | 仿真冒烟（navi_mode=1，lidar） | ✅ 通过 | 起点 (−19,1) → 目标 (5,0)，约 24 m，正常抵达 |
-| ros1_bridge 安装 | ✅ 完成 | apt `ros-foxy-ros1-bridge 0.9.7-1focal`（arm64） |
+| ros1_bridge 安装 | ✅ 完成（**当前流程用不上**） | apt 装的 0.9.7-1focal；方案 A 下整条链路纯 ROS1 闭环，无需跨栈桥接（见第 13 章） |
 | 桥接方案修正 | ✅ 完成 | **只需桥 1 个 `/cmd_vel`**，点云/里程计原生同域 |
 | Lite3 模型替换（官方 URDF + 网格） | ✅ 完成 | 新增 `lite3_description` 包 |
 | Lite3 参数适配 + A/B 回归 | ✅ 完成 | 见 `05-避坑事项.md` 第 8 章，双次复跑通过 |
@@ -24,7 +25,9 @@
 | **雷达硬件定性** | ✅ 完成 | 实为 **Livox Mid360**（IP `192.168.1.201`，抓包定性），走 ROS1 的 `start_livox.sh`；`c16.yaml` / `/rslidar_points` / `lidar_type: 4` 全是历史遗留名（第 11 章） |
 | 临时环境脚本（建立 + 备份 + 复原） | ✅ 完成 | `scripts/env.sh` 自动快照、`scripts/env_restore.sh` 精确复原，往返已实测 |
 | 真机封装脚本（自带 master 探活） | ✅ 完成 | `scripts/start_lio_relay.sh`、`scripts/start_scan_real.sh` |
-| **真机本体接入** | ⏳ 未开始 | 见 `05-避坑事项.md` 第 9 章，6 步清单 |
+| **真机链路打通** | ✅ 完成 | 雷达/SLAM/relay/规划器/远程可视化全部实测通过（见 `07-真机联调执行报告.md`） |
+| **本体接管根因定位** | ✅ 完成（源码级） | 狗不动 ≠ 规划器没发速度：机器人必须**自主模式 + 4 Hz 心跳**才吃 `/cmd_vel`（避坑第 19 章）。已落 `scripts/auto_mode.sh`、`scripts/body_link.sh` |
+| **机器人本体运动** | ⏳ 待上电验证 | 收工前发现电量不足未实测。下次开工顺序：`auto_mode.sh auto` → `body_link.sh start` → `goal.sh 1.0 0.0 0.0` |
 
 ---
 
@@ -39,13 +42,13 @@
 | # | 约束 | 影响 | 处置 |
 |---|---|---|---|
 | C1 | **103 直连 GitHub 不通**（可解析但 TCP 超时），国内镜像/ROS/NVIDIA 源正常 | 裸 `git clone https://github.com/...` 会卡死 | 走本机代理 `http://192.168.2.47:7897`（**实测 clone 成功，4m29s**）；或 `gh-proxy.com` 镜像；离线 scp 仅作兜底 |
-| C2 | **103 默认跑 ROS 2 Foxy**（`transfer_ros2.service` 常驻），而 SCAN-Planner 主分支是 ROS 1 | 环境串味、话题不通 | 编译/运行前用专用脚本只 source Noetic；真机数据用 `ros1_bridge` 跨栈桥接 |
+| C2 | **103 默认跑 ROS 2 Foxy**（`transfer_ros2.service` 常驻），而 SCAN-Planner 主分支是 ROS 1 | 环境串味；两套 transfer 抢 UDP 43897 | 编译/运行前用专用脚本只 source Noetic；**联调时停掉 `transfer_ros2.service`，走纯 ROS1 链路（不需要 ros1_bridge）** |
 | C3 | **SCAN-Planner 默认参数与执行器面向 Unitree Go2**，103 载的是 Lite3 | 尺寸/速度/步态接口不匹配 | 阶段二改 `advanced_param.xml` 的机体包络与速度参数，并用 `/cmd_vel` 对接 Lite3 控制口 |
 
 分级建议：
 
 - **阶段一（可行、低风险、建议立即做）**：离线落地源码 → `catkin_make` 编译 → 用自带仿真器（mockamap + pcl_render_node）跑通 navi_mode 1/2/3。此阶段**不碰真机、不改主机现有 ROS 2 服务**。
-- **阶段二（可行、中风险）**：接真机。需要 ros1_bridge（foxy↔noetic）或等效中继，把 faster_lio 的里程计与雷达点云喂给规划器，并把 `/cmd_vel` 回传给 Lite3。
+- ~~阶段二（可行、中风险）：接真机。需要 ros1_bridge（foxy↔noetic）或等效中继…~~ **已于 2026-09-30 修正**：103 上 ROS1 侧本就有 livox 驱动 + faster_lio + 本体 IMU 通路，停掉抢占端口的 `transfer_ros2.service` 后整条链路可**纯 ROS1 闭环**，一条桥都不需要。详见 `07-真机联调执行报告.md` §3.1。
 - **不建议**：使用 `ros2-community` 分支 —— 该分支明确要求 **Ubuntu 22.04 + ROS 2 Humble + C++17**，与 103 的 20.04/Foxy 不匹配。
 
 ---
@@ -54,6 +57,7 @@
 
 | 文件 | 内容 |
 |---|---|
+| **`07-真机联调执行报告.md`** | ⭐ **阶段二结果**：链路拓扑、执行时间线、本轮解决的 8 个问题、真机实测数据、脚本清单、剩余待办 |
 | **`06-真机启动流程.md`** | ⭐ **操作单**：开 6~7 个终端、先建环境再逐个启动、每步的自检命令、排障速查表、关停顺序。**真机联调照着这份走** |
 | `01-兼容性评估.md` | 项目依赖清单、103 实测环境、逐项对照表、风险登记与降级方案 |
 | `02-部署执行方案.md` | 准备工作、作业空间目录设计、离线传输、编译、三级验证、真机接入方案、参数适配清单 |
@@ -73,6 +77,12 @@
 | `fake_lio.py` / `test_lio_relay.sh` / `test_realworld_e2e.sh` | 假数据源 + relay 与真机链路的离线验证 |
 | `start_lio_relay.sh` | 真机：先探 master 再启 `/LIO/*` 中继，连不上 20s 内报错退出 |
 | `start_scan_real.sh` | 真机：以 `is_real_world:=true navi_mode:=1 need_extrinsic:=false` 启动规划器 |
+| `start_slam_headless.sh` | 真机：免桌面启 SLAM（自带 `rviz:=false`，绕开 `Cannot open display`） |
+| **`preflight.sh`** | ⭐ **开工预检**：12 项只读检查（环境/master/端口抢占/遥测/雷达/SLAM/relay/规划器/rosbridge/**本体接管**），末尾给"下一步建议" |
+| **`start_all.sh`** | ⭐ **一键拉起**：roscore→本体→雷达→SLAM→relay→规划器→[`--bridge`]；逐步等数据就绪，已跑则跳过，支持 `SKIP_TO=` |
+| `stop_all.sh` | 反序停上面这一串；`--all` 连 roscore 一起停 |
+| **`auto_mode.sh`** | 🔴 **机器人接管**：`auto`（自主模式 + 4 Hz 心跳，Ctrl+C 自动零速度+回手柄）/ `handle` / `zero` / `stop` |
+| **`body_link.sh`** | 🔴 **速度接通**：`start` / `stop` / `status`，把 `/scan_planner/cmd_vel` relay 到 `/cmd_vel` |
 
 ---
 
@@ -193,9 +203,11 @@ bash /home/ysc/lite_cog/system/scripts/slam/start_slam.sh
 bash scripts/start_lio_relay.sh
 # ④ SCAN-Planner 真机模式（先不接机器人）
 bash scripts/start_scan_real.sh
-# ⑤ 只桥一个 Twist
-ros2 run ros1_bridge parameter_bridge /scan_planner/cmd_vel@geometry_msgs/msg/Twist@geometry_msgs/Twist
+# ⑤ 只接一条速度（方案 A = 纯 ROS1，不需要 ros1_bridge）
+bash scripts/auto_mode.sh auto      # 自主模式 + 4 Hz 心跳（另开终端常挂，缺了狗不动）
+bash scripts/body_link.sh start     # /scan_planner/cmd_vel -> /cmd_vel（脚本内 3 秒安全确认）
 # ⑥ 首次上电：四腿离地 + 限速，再落地
+bash scripts/goal.sh 1.0 0.0 0.0    # 注意 z 用 0（/Odometry 的 body 原点 z≈0）
 ```
 
 > ③ ④ 也可以手动跑：`source scripts/env.sh` 后再
@@ -203,7 +215,12 @@ ros2 run ros1_bridge parameter_bridge /scan_planner/cmd_vel@geometry_msgs/msg/Tw
 > `roslaunch scan_planner run.launch is_real_world:=true navi_mode:=1 sensor_type:=lidar need_extrinsic:=false`。
 > 但**裸敲 `roslaunch` 会报 command not found**——终端默认是 foxy，必须先建环境。
 
-⚠️ 上述 6 步中的**真机部分尚未执行**；第 ①～④ 的数据链路已用假数据源端到端验证通过。
+> 🔴 ⑤ 里的 `auto_mode.sh` 是 2026-09-30 才定位到的**必要条件**：
+> `ros2qnx` 虽然无条件把 `/cmd_vel` 发到 43893，但机器人本体只有在**自主模式**下才吃这些包，
+> 且自主模式期间上位机必须持续发**心跳**（`kHeartBeat=0x21040001`，4 Hz），否则本体会自行退回手柄模式。
+> 详见避坑第 19 章。
+
+**数据链路①～④ 已真机实测通过；⑤（本体运动）因收工时电量不足未实测。**
 
 ---
 
